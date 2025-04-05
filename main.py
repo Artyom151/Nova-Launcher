@@ -12,8 +12,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QLineEdit, QProgressBar, QMessageBox,
                              QStackedWidget, QFileDialog, QScrollArea, QListWidget, QDialog,
                              QFormLayout, QTabWidget, QCheckBox, QSystemTrayIcon, QMenu,
-                             QListWidgetItem, QGroupBox, QSpinBox)
-from PySide6.QtGui import QFont, QFontDatabase, QIcon, QPixmap, QPalette, QBrush, QAction
+                             QListWidgetItem, QGroupBox, QSpinBox, QSizePolicy, QButtonGroup,
+                             QErrorMessage, QSplashScreen)
+from PySide6.QtGui import QFont, QFontDatabase, QIcon, QPixmap, QPalette, QBrush, QAction, QColor
 from PySide6.QtCore import (Qt, QThread, Signal, QTimer, QPoint, QPropertyAnimation, 
                            QEasingCurve, QParallelAnimationGroup, QAbstractAnimation)
 from splash_screen import LoadingSplash
@@ -206,11 +207,105 @@ class UpdateChecker(QThread):
             # Игнорируем ошибки при проверке обновлений
             pass
 
+class VersionCache:
+    def __init__(self, cache_file):
+        self.cache_file = cache_file
+        self.cache = {}
+        self.load_cache()
+    
+    def load_cache(self):
+        try:
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'r') as f:
+                    self.cache = json.load(f)
+        except:
+            self.cache = {}
+    
+    def save_cache(self):
+        try:
+            with open(self.cache_file, 'w') as f:
+                json.dump(self.cache, f)
+        except:
+            pass
+    
+    def get_version_info(self, version_id):
+        return self.cache.get(version_id, {})
+    
+    def update_version_info(self, version_id, info):
+        self.cache[version_id] = info
+        self.save_cache()
+
+class VersionInfoWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        self.version_label = QLabel()
+        self.version_label.setFont(parent.minecraft_font)
+        self.type_label = QLabel()
+        self.type_label.setFont(parent.minecraft_font)
+        self.release_date_label = QLabel()
+        self.release_date_label.setFont(parent.minecraft_font)
+        self.status_label = QLabel()
+        self.status_label.setFont(parent.minecraft_font)
+        self.default_label = QLabel()
+        self.default_label.setFont(parent.minecraft_font)
+        
+        layout.addWidget(self.version_label)
+        layout.addWidget(self.type_label)
+        layout.addWidget(self.release_date_label)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.default_label)
+        
+        self.setVisible(False)
+    
+    def update_info(self, version_info):
+        if not version_info:
+            self.setVisible(False)
+            return
+            
+        self.version_label.setText(f"Версия: {version_info.get('id', 'Неизвестно')}")
+        
+        version_type = version_info.get('type', 'release')
+        type_text = {
+            'release': 'Релиз',
+            'snapshot': 'Снапшот',
+            'old_beta': 'Бета',
+            'old_alpha': 'Альфа'
+        }.get(version_type, version_type.capitalize())
+        self.type_label.setText(f"Тип: {type_text}")
+        
+        release_date = version_info.get('releaseTime', '')
+        if release_date:
+            try:
+                date = datetime.fromisoformat(release_date.replace('Z', '+00:00'))
+                formatted_date = date.strftime('%d.%m.%Y')
+                self.release_date_label.setText(f"Дата выхода: {formatted_date}")
+            except:
+                self.release_date_label.setText("Дата выхода: Неизвестно")
+        else:
+            self.release_date_label.setText("Дата выхода: Неизвестно")
+        
+        is_installed = version_info.get('is_installed', False)
+        self.status_label.setText("Статус: Установлена" if is_installed else "Статус: Не установлена")
+        
+        # Добавляем информацию о версии по умолчанию
+        is_default = version_info.get('is_default', False)
+        if is_default:
+            self.default_label.setText("Установлена как версия по умолчанию")
+            self.default_label.setStyleSheet("color: #4CAF50;")  # Зеленый цвет для версии по умолчанию
+            self.default_label.setVisible(True)
+        else:
+            self.default_label.setVisible(False)
+        
+        self.setVisible(True)
+
 class MinecraftLauncher(QMainWindow):
     def __init__(self):
         super().__init__()
         # Устанавливаем версию лаунчера
-        self.launcher_version = "1.4"
+        self.launcher_version = "1.5"
         
         # Изменяем пути файлов для использования кастомной директории
         self.nova_directory = os.path.join(os.path.expanduser("~"), ".nova_launcher")
@@ -221,6 +316,15 @@ class MinecraftLauncher(QMainWindow):
             os.makedirs(self.minecraft_directory)
         if not os.path.exists(self.nova_directory):
             os.makedirs(self.nova_directory)
+            
+        # Загружаем настройки в самом начале
+        self.settings = self.load_settings()
+        if "experimental_features" not in self.settings:
+            self.settings["experimental_features"] = False
+            self.save_settings()
+            
+        # Инициализируем кэш версий
+        self.version_cache = VersionCache(os.path.join(self.nova_directory, "version_cache.json"))
             
         # Настройка окна и базового стиля
         self.setWindowTitle("Nova Launcher")
@@ -233,9 +337,6 @@ class MinecraftLauncher(QMainWindow):
         # Установка фона в самом начале
         self.background_path = os.path.join("Resources", "minecraft_launcher.png")
         self.setup_permanent_background()
-        
-        # Load settings
-        self.load_settings()
         
         # Load Minecraft font
         font_path = os.path.join("Resources", "minecraft-ten-font-cyrillic.ttf")
@@ -270,20 +371,6 @@ class MinecraftLauncher(QMainWindow):
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(0)
 
-        # Create stacked widget for content
-        self.content_stack = SmoothStackedWidget()
-        self.content_stack.setSpeed(300)
-        self.content_stack.setAnimation(QEasingCurve.OutCubic)
-        self.content_stack.setWrap(False)
-        
-        # Create pages first
-        self.play_page = self.create_play_page()
-        self.versions_page = self.create_versions_page()
-        self.skins_page = self.create_skins_page()
-        self.news_page = self.create_news_page()
-        self.settings_page = self.create_settings_page()
-        self.social_page = self.create_social_page()
-
         # Add profile selector to sidebar
         profile_layout = QHBoxLayout()
         add_profile_button = QPushButton("+")
@@ -302,29 +389,26 @@ class MinecraftLauncher(QMainWindow):
         sidebar_layout.addWidget(logo_label)
         sidebar_layout.addSpacing(20)
         
-        # Create sidebar buttons
+        # Create stacked widget for content
+        self.content_stack = SmoothStackedWidget()
+        self.content_stack.setSpeed(300)
+        self.content_stack.setAnimation(QEasingCurve.OutCubic)
+        self.content_stack.setWrap(False)
+        
+        # Create pages first
+        self.play_page = self.create_play_page()
+        self.skins_page = self.create_skins_page()
+        self.mods_page = self.create_mods_page()
+        self.news_page = self.create_news_page()
+        self.settings_page = self.create_settings_page()
+        self.social_page = self.create_social_page()
+        
+        # Create sidebar buttons and add stretch
         self.sidebar_buttons = []
-        pages = [
-            ("ИГРАТЬ", self.play_page),
-            ("УСТАНОВКИ", self.versions_page),
-            ("СКИНЫ", self.skins_page),
-            ("НОВОСТИ", self.news_page),
-            ("НАСТРОЙКИ", self.settings_page),
-            ("СООБЩЕСТВО", self.social_page)
-        ]
-
-        for i, (text, page) in enumerate(pages):
-            button = SidebarButton(text, self)
-            button.setObjectName("sidebarButton")
-            button.clicked.connect(lambda checked, index=i: self.change_page(index))
-            sidebar_layout.addWidget(button)
-            self.sidebar_buttons.append(button)
-            self.content_stack.addWidget(page)
-
         sidebar_layout.addStretch()
         
         # Add version info at bottom of sidebar
-        version_label = QLabel("Nova Launcher 1.4")
+        version_label = QLabel(f"Nova Launcher {self.launcher_version}")
         version_label.setFont(self.minecraft_font)
         version_label.setAlignment(Qt.AlignCenter)
         version_label.setObjectName("versionLabel")
@@ -334,9 +418,8 @@ class MinecraftLauncher(QMainWindow):
         main_layout.addWidget(sidebar)
         main_layout.addWidget(self.content_stack)
         
-        # Select first page by default
-        self.sidebar_buttons[0].setChecked(True)
-        self.content_stack.setCurrentIndex(0)
+        # Create sidebar buttons after all widgets are created
+        self.create_sidebar_buttons()
         
         # Set stylesheet
         self.apply_theme()
@@ -374,82 +457,314 @@ class MinecraftLauncher(QMainWindow):
                 background-position: center;
                 background-repeat: no-repeat;
                 background-attachment: fixed;
-                background-color: #2C2C2C;
+                background-color: #1E1E1E;
             }}
         """
         
-        # Добавляем остальные стили
+        # Добавляем современные стили
         additional_styles = """
+            /* Боковая панель */
             #sidebar {
-                background-color: rgba(21, 21, 21, 200);
-                border-right: 1px solid rgba(255, 255, 255, 30);
+                background-color: rgba(18, 18, 18, 0.95);
+                border-right: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 10px 0;
             }
+
+            /* Кнопки боковой панели */
             #sidebarButton {
                 background-color: transparent;
                 border: none;
-                color: white;
+                color: rgba(255, 255, 255, 0.7);
                 text-align: left;
-                padding: 10px 20px;
+                padding: 12px 25px;
                 font-size: 14px;
+                border-radius: 0;
+                margin: 2px 10px;
             }
+
             #sidebarButton:hover {
-                background-color: rgba(255, 255, 255, 20);
+                background-color: rgba(255, 255, 255, 0.1);
+                color: white;
+                border-radius: 6px;
             }
+
             #sidebarButton:checked {
-                background-color: rgba(255, 255, 255, 30);
-                border-left: 4px solid #43A047;
+                background-color: rgba(67, 160, 71, 0.2);
+                color: #4CAF50;
+                border-radius: 6px;
+                font-weight: bold;
             }
+
+            /* Версия лаунчера */
             #versionLabel {
-                color: rgba(255, 255, 255, 100);
-                padding: 10px;
+                color: rgba(255, 255, 255, 0.5);
+                padding: 15px;
+                font-size: 12px;
+                border-top: 1px solid rgba(255, 255, 255, 0.1);
             }
+
+            /* Основные виджеты */
             QWidget {
                 color: white;
             }
+
+            /* Поля ввода */
             QLineEdit {
-                background-color: rgba(45, 45, 45, 180);
+                background-color: rgba(30, 30, 30, 0.95);
                 color: white;
-                border: 1px solid rgba(61, 61, 61, 180);
-                padding: 8px;
-                border-radius: 4px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 10px;
+                border-radius: 6px;
+                selection-background-color: #4CAF50;
             }
+
+            QLineEdit:focus {
+                border: 1px solid rgba(76, 175, 80, 0.5);
+                background-color: rgba(35, 35, 35, 0.95);
+            }
+
+            /* Выпадающие списки */
             QComboBox {
-                background-color: rgba(45, 45, 45, 180);
+                background-color: rgba(30, 30, 30, 0.95);
                 color: white;
-                border: 1px solid rgba(61, 61, 61, 180);
-                padding: 8px;
-                border-radius: 4px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 10px;
+                border-radius: 6px;
                 min-width: 200px;
             }
+
+            QComboBox:hover {
+                border: 1px solid rgba(76, 175, 80, 0.5);
+                background-color: rgba(35, 35, 35, 0.95);
+            }
+
             QComboBox::drop-down {
                 border: none;
+                width: 30px;
             }
+
             QComboBox::down-arrow {
-                image: none;
-                border: none;
+                image: url(Resources/down_arrow.png);
+                width: 12px;
+                height: 12px;
             }
+
+            QComboBox QAbstractItemView {
+                background-color: rgba(30, 30, 30, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                selection-background-color: rgba(76, 175, 80, 0.3);
+                selection-color: white;
+                border-radius: 6px;
+            }
+
+            /* Кнопка запуска */
             QPushButton#playButton {
-                background-color: #43A047;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #43A047, 
+                    stop:1 #4CAF50);
                 color: white;
                 border: none;
-                border-radius: 4px;
-                padding: 10px 20px;
+                border-radius: 8px;
+                padding: 15px 30px;
                 font-size: 16px;
+                font-weight: bold;
+                min-height: 50px;
             }
+
             QPushButton#playButton:hover {
-                background-color: #2E7D32;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #388E3C, 
+                    stop:1 #43A047);
             }
+
+            QPushButton#playButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #2E7D32, 
+                    stop:1 #388E3C);
+            }
+
+            /* Прогресс бар */
             QProgressBar {
-                border: 1px solid rgba(61, 61, 61, 180);
+                border: none;
                 border-radius: 4px;
                 text-align: center;
-                background-color: rgba(45, 45, 45, 180);
+                background-color: rgba(30, 30, 30, 0.95);
+                height: 8px;
             }
+
             QProgressBar::chunk {
-                background-color: #43A047;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #43A047, 
+                    stop:1 #4CAF50);
+                border-radius: 4px;
             }
+
+            /* Метки */
             QLabel {
+                color: rgba(255, 255, 255, 0.9);
+            }
+
+            QLabel#profileInfo {
+                background-color: rgba(30, 30, 30, 0.95);
+                padding: 20px;
+                border-radius: 8px;
+                font-size: 14px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+
+            /* Списки */
+            QListWidget {
+                background-color: rgba(30, 30, 30, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 8px;
+                padding: 5px;
+            }
+
+            QListWidget::item {
+                padding: 10px;
+                border-radius: 4px;
+                margin: 2px;
+            }
+
+            QListWidget::item:selected {
+                background-color: rgba(76, 175, 80, 0.3);
                 color: white;
+            }
+
+            QListWidget::item:hover {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+
+            /* Вкладки */
+            QTabWidget::pane {
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 8px;
+                background-color: rgba(30, 30, 30, 0.95);
+            }
+
+            QTabBar::tab {
+                background-color: rgba(30, 30, 30, 0.95);
+                color: rgba(255, 255, 255, 0.7);
+                padding: 10px 20px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+            }
+
+            QTabBar::tab:selected {
+                background-color: rgba(76, 175, 80, 0.2);
+                color: #4CAF50;
+            }
+
+            QTabBar::tab:hover:!selected {
+                background-color: rgba(255, 255, 255, 0.1);
+                color: white;
+            }
+
+            /* Полосы прокрутки */
+            QScrollBar:vertical {
+                border: none;
+                background: rgba(30, 30, 30, 0.95);
+                width: 10px;
+                margin: 0;
+            }
+
+            QScrollBar::handle:vertical {
+                background: rgba(76, 175, 80, 0.3);
+                border-radius: 5px;
+                min-height: 20px;
+            }
+
+            QScrollBar::handle:vertical:hover {
+                background: rgba(76, 175, 80, 0.5);
+            }
+
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+
+            /* Групповые боксы */
+            QGroupBox {
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 8px;
+                padding: 15px;
+                margin-top: 20px;
+            }
+
+            QGroupBox::title {
+                color: rgba(255, 255, 255, 0.9);
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+
+            /* Чекбоксы */
+            QCheckBox {
+                color: rgba(255, 255, 255, 0.9);
+                spacing: 5px;
+            }
+
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                background: rgba(30, 30, 30, 0.95);
+            }
+
+            QCheckBox::indicator:checked {
+                background: #4CAF50;
+                border: 1px solid #43A047;
+            }
+
+            QCheckBox::indicator:hover {
+                border: 1px solid rgba(76, 175, 80, 0.5);
+            }
+
+            /* Стандартные кнопки */
+            QPushButton {
+                background-color: rgba(30, 30, 30, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                color: white;
+                padding: 8px 16px;
+                border-radius: 6px;
+            }
+
+            QPushButton:hover {
+                background-color: rgba(76, 175, 80, 0.2);
+                border: 1px solid rgba(76, 175, 80, 0.5);
+            }
+
+            QPushButton:pressed {
+                background-color: rgba(76, 175, 80, 0.3);
+            }
+
+            /* Спинбоксы */
+            QSpinBox {
+                background-color: rgba(30, 30, 30, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 8px;
+                border-radius: 6px;
+                color: white;
+            }
+
+            QSpinBox::up-button, QSpinBox::down-button {
+                border: none;
+                background: rgba(76, 175, 80, 0.2);
+                border-radius: 3px;
+            }
+
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background: rgba(76, 175, 80, 0.3);
+            }
+
+            /* Всплывающие подсказки */
+            QToolTip {
+                background-color: rgba(18, 18, 18, 0.95);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 4px;
+                padding: 5px;
             }
         """
         
@@ -517,170 +832,50 @@ class MinecraftLauncher(QMainWindow):
         versions_tab = QWidget()
         versions_layout = QVBoxLayout(versions_tab)
         
-        versions_description = QLabel("Выбор версий временно недоступен из-за технических проблем.\nПриносим извинения за неудобства.")
-        versions_description.setFont(self.minecraft_font)
-        versions_description.setWordWrap(True)
-        versions_description.setStyleSheet("color: #ff6b6b;")  # Красный цвет для уведомления
-        versions_layout.addWidget(versions_description)
+        versions_group = QGroupBox("Отображение типов версий")
+        versions_group.setFont(self.minecraft_font)
+        versions_group_layout = QVBoxLayout(versions_group)
         
-        # Чекбоксы для типов версий (отключенные)
+        # Чекбоксы для типов версий
         self.show_release_checkbox = QCheckBox("Релизы (стабильные версии)")
         self.show_release_checkbox.setFont(self.minecraft_font)
         self.show_release_checkbox.setChecked(self.settings.get("show_release", True))
-        self.show_release_checkbox.setEnabled(False)
         
         self.show_snapshot_checkbox = QCheckBox("Snapshots (тестовые сборки)")
         self.show_snapshot_checkbox.setFont(self.minecraft_font)
         self.show_snapshot_checkbox.setChecked(self.settings.get("show_snapshot", False))
-        self.show_snapshot_checkbox.setEnabled(False)
         
         self.show_beta_checkbox = QCheckBox("Beta (устаревшие бета-версии)")
         self.show_beta_checkbox.setFont(self.minecraft_font)
         self.show_beta_checkbox.setChecked(self.settings.get("show_beta", False))
-        self.show_beta_checkbox.setEnabled(False)
         
         self.show_alpha_checkbox = QCheckBox("Alpha (устаревшие альфа-версии)")
         self.show_alpha_checkbox.setFont(self.minecraft_font)
         self.show_alpha_checkbox.setChecked(self.settings.get("show_alpha", False))
-        self.show_alpha_checkbox.setEnabled(False)
         
-        versions_layout.addWidget(self.show_release_checkbox)
-        versions_layout.addWidget(self.show_snapshot_checkbox)
-        versions_layout.addWidget(self.show_beta_checkbox)
-        versions_layout.addWidget(self.show_alpha_checkbox)
+        versions_group_layout.addWidget(self.show_release_checkbox)
+        versions_group_layout.addWidget(self.show_snapshot_checkbox)
+        versions_group_layout.addWidget(self.show_beta_checkbox)
+        versions_group_layout.addWidget(self.show_alpha_checkbox)
+        
+        # Добавляем все элементы на вкладку версий
+        versions_layout.addWidget(versions_group)
+        
+        # Добавляем кнопку сохранения настроек версий
+        save_versions_button = QPushButton("Сохранить настройки версий")
+        save_versions_button.setFont(self.minecraft_font)
+        save_versions_button.clicked.connect(self.save_versions_settings)
+        versions_layout.addWidget(save_versions_button)
         versions_layout.addStretch()
         
-        # ================ Таб для настроек директорий ================
-        dirs_tab = QWidget()
-        dirs_layout = QVBoxLayout(dirs_tab)
-        
-        dirs_description = QLabel("Управление директориями:")
-        dirs_description.setFont(self.minecraft_font)
-        dirs_layout.addWidget(dirs_description)
-        
-        # Поле для выбора директории загрузки
-        download_layout = QHBoxLayout()
-        download_label = QLabel("Директория загрузок:")
-        download_label.setFont(self.minecraft_font)
-        
-        self.download_location_input = QLineEdit()
-        self.download_location_input.setFont(self.minecraft_font)
-        self.download_location_input.setText(self.settings.get("download_location", self.minecraft_directory))
-        
-        browse_download_button = QPushButton("Обзор")
-        browse_download_button.setFont(self.minecraft_font)
-        browse_download_button.clicked.connect(self.browse_download_location)
-        
-        download_layout.addWidget(download_label)
-        download_layout.addWidget(self.download_location_input)
-        download_layout.addWidget(browse_download_button)
-        
-        # Поле для выбора пути к Java
-        java_layout = QHBoxLayout()
-        java_label = QLabel("Путь к Java:")
-        java_label.setFont(self.minecraft_font)
-        
-        self.java_path_input = QLineEdit()
-        self.java_path_input.setFont(self.minecraft_font)
-        self.java_path_input.setText(self.settings.get("java_path", ""))
-        self.java_path_input.setPlaceholderText("Оставьте пустым для автоматического выбора")
-        
-        browse_java_button = QPushButton("Обзор")
-        browse_java_button.setFont(self.minecraft_font)
-        browse_java_button.clicked.connect(self.browse_java_path)
-        
-        java_layout.addWidget(java_label)
-        java_layout.addWidget(self.java_path_input)
-        java_layout.addWidget(browse_java_button)
-        
-        dirs_layout.addLayout(download_layout)
-        dirs_layout.addLayout(java_layout)
-        dirs_layout.addStretch()
-        
-        # ================ Таб для дополнительных настроек ================
-        advanced_tab = QWidget()
-        advanced_layout = QVBoxLayout(advanced_tab)
-        
-        # Группа управления лаунчером
-        launcher_group = QWidget()
-        launcher_form = QFormLayout(launcher_group)
-        
-        # Чекбоксы для настроек трея и обновлений
-        self.show_tray_checkbox = QCheckBox("Показывать значок в трее")
-        self.show_tray_checkbox.setFont(self.minecraft_font)
-        self.show_tray_checkbox.setChecked(self.settings.get("show_tray_icon", True))
-        
-        self.minimize_to_tray_checkbox = QCheckBox("Сворачивать в трей при закрытии")
-        self.minimize_to_tray_checkbox.setFont(self.minecraft_font)
-        self.minimize_to_tray_checkbox.setChecked(self.settings.get("minimize_to_tray", True))
-        
-        self.auto_check_updates_checkbox = QCheckBox("Автоматически проверять обновления")
-        self.auto_check_updates_checkbox.setFont(self.minecraft_font)
-        self.auto_check_updates_checkbox.setChecked(self.settings.get("auto_check_updates", True))
-        
-        # Комбобоксы для дополнительных настроек
-        self.auto_update_combo = QComboBox()
-        self.auto_update_combo.setFont(self.minecraft_font)
-        self.auto_update_combo.addItems(["Включено", "Выключено"])
-        self.auto_update_combo.setCurrentText(self.settings.get("auto_update", "Включено"))
-        
-        self.close_launcher_combo = QComboBox()
-        self.close_launcher_combo.setFont(self.minecraft_font)
-        self.close_launcher_combo.addItems(["Да", "Нет"])
-        self.close_launcher_combo.setCurrentText(self.settings.get("close_launcher", "Нет"))
-        
-        # Поле для дополнительных аргументов Java
-        self.additional_args_input = QLineEdit()
-        self.additional_args_input.setFont(self.minecraft_font)
-        self.additional_args_input.setText(self.settings.get("additional_arguments", ""))
-        self.additional_args_input.setPlaceholderText("Например: -XX:+UseConcMarkSweepGC")
-        
-        # Добавляем элементы в форму
-        launcher_form.addRow("Обновление Minecraft:", self.auto_update_combo)
-        launcher_form.addRow("Закрывать лаунчер при запуске игры:", self.close_launcher_combo)
-        advanced_layout.addWidget(launcher_group)
-        advanced_layout.addWidget(self.show_tray_checkbox)
-        advanced_layout.addWidget(self.minimize_to_tray_checkbox)
-        advanced_layout.addWidget(self.auto_check_updates_checkbox)
-        
-        advanced_layout.addWidget(QLabel("Дополнительные аргументы Java:"))
-        advanced_layout.addWidget(self.additional_args_input)
-        advanced_layout.addStretch()
-        
-        # ================ Таб для управления данными ================
-        data_tab = QWidget()
-        data_layout = QVBoxLayout(data_tab)
-        
-        data_description = QLabel("Управление данными лаунчера:")
-        data_description.setFont(self.minecraft_font)
-        data_description.setWordWrap(True)
-        data_layout.addWidget(data_description)
-        
-        # Кнопки для управления данными
-        backup_button = QPushButton("Создать резервную копию")
-        backup_button.setFont(self.minecraft_font)
-        backup_button.clicked.connect(self.create_backup)
-        
-        restore_button = QPushButton("Восстановить из резервной копии")
-        restore_button.setFont(self.minecraft_font)
-        restore_button.clicked.connect(self.restore_from_backup)
-        
-        reset_button = QPushButton("Сбросить настройки лаунчера")
-        reset_button.setFont(self.minecraft_font)
-        reset_button.clicked.connect(self.reset_launcher_settings)
-        
-        data_layout.addWidget(backup_button)
-        data_layout.addWidget(restore_button)
-        data_layout.addWidget(reset_button)
-        data_layout.addStretch()
+        # ================ Остальные табы остаются без изменений ================
         
         # Добавляем все табы
-        tabs.addTab(basic_tab, "Основные")
         tabs.addTab(memory_tab, "Память")
         tabs.addTab(versions_tab, "Версии")
-        tabs.addTab(dirs_tab, "Директории")
-        tabs.addTab(advanced_tab, "Дополнительно")
-        tabs.addTab(data_tab, "Данные")
+        tabs.addTab(self.create_dirs_tab(), "Директории")
+        tabs.addTab(self.create_advanced_tab(), "Дополнительно")
+        tabs.addTab(self.create_data_tab(), "Данные")
         
         layout.addWidget(tabs)
         
@@ -741,7 +936,7 @@ class MinecraftLauncher(QMainWindow):
         profile_info = QLabel()
         profile_info.setFont(self.minecraft_font)
         profile_info.setObjectName("profileInfo")
-        self.profile_info_label = profile_info  # Store reference for updates
+        self.profile_info_label = profile_info
         layout.addWidget(profile_info)
         
         # Add profile management button
@@ -753,7 +948,6 @@ class MinecraftLauncher(QMainWindow):
         profile_buttons_layout.addStretch()
         layout.addLayout(profile_buttons_layout)
         
-        # Add spacer
         layout.addStretch()
         
         # Version selection
@@ -767,12 +961,36 @@ class MinecraftLauncher(QMainWindow):
         version_layout.addWidget(self.version_combo)
         version_layout.addStretch()
         
+        # Добавляем виджет информации о версии
+        self.version_info = VersionInfoWidget(self)
+        version_layout.addWidget(self.version_info)
+        
+        # Progress container
+        progress_container = QWidget()
+        progress_layout = QVBoxLayout(progress_container)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(10)
+        
         # Progress bar
-        self.progress_bar = QProgressBar()
+        self.progress_bar = SimpleProgressBar()
         self.progress_bar.setVisible(False)
+        
+        # Progress label with improved style
         self.progress_label = QLabel("")
         self.progress_label.setFont(self.minecraft_font)
+        self.progress_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                background-color: rgba(0, 0, 0, 0.3);
+                border-radius: 4px;
+                padding: 8px;
+            }
+        """)
+        self.progress_label.setAlignment(Qt.AlignCenter)
         self.progress_label.setVisible(False)
+        
+        progress_layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(self.progress_label)
         
         # Container for version selection and play button
         bottom_container = QWidget()
@@ -791,9 +1009,8 @@ class MinecraftLauncher(QMainWindow):
         self.play_button.clicked.connect(self.launch_minecraft)
         bottom_layout.addWidget(self.play_button)
         
-        # Add progress indicators
-        bottom_layout.addWidget(self.progress_bar)
-        bottom_layout.addWidget(self.progress_label)
+        # Add progress container
+        bottom_layout.addWidget(progress_container)
         
         # Add bottom container to main layout
         layout.addWidget(bottom_container, alignment=Qt.AlignBottom)
@@ -807,40 +1024,6 @@ class MinecraftLauncher(QMainWindow):
         """Открывает окно для просмотра скриншотов"""
         screenshots_dialog = ScreenshotsDialog(self)
         screenshots_dialog.exec()
-        
-    def create_versions_page(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(40, 40, 40, 40)
-        
-        # Installed versions list
-        versions_label = QLabel("Установленные версии")
-        versions_label.setFont(self.minecraft_font)
-        layout.addWidget(versions_label)
-        
-        self.versions_list = QListWidget()
-        self.versions_list.setFont(self.minecraft_font)
-        self.update_installed_versions()
-        layout.addWidget(self.versions_list)
-        
-        # Version management buttons
-        buttons_layout = QHBoxLayout()
-        
-        delete_button = QPushButton("Удалить")
-        delete_button.setFont(self.minecraft_font)
-        delete_button.clicked.connect(self.delete_version)
-        
-        refresh_button = QPushButton("Обновить")
-        refresh_button.setFont(self.minecraft_font)
-        refresh_button.clicked.connect(self.update_installed_versions)
-        
-        buttons_layout.addWidget(delete_button)
-        buttons_layout.addWidget(refresh_button)
-        buttons_layout.addStretch()
-        
-        layout.addLayout(buttons_layout)
-        
-        return page
 
     def create_skins_page(self):
         page = QWidget()
@@ -1315,6 +1498,15 @@ class MinecraftLauncher(QMainWindow):
             try:
                 # Получаем полный список версий
                 version_list = minecraft_launcher_lib.utils.get_version_list()
+                installed_versions = minecraft_launcher_lib.utils.get_installed_versions(self.minecraft_directory)
+                installed_version_ids = [v["id"] for v in installed_versions]
+                
+                for version in version_list:
+                    version_id = version["id"]
+                    version["is_installed"] = version_id in installed_version_ids
+                    # Обновляем кэш версий
+                    if hasattr(self, 'version_cache'):
+                        self.version_cache.update_version_info(version_id, version)
                 
                 # Фильтруем версии согласно настройкам
                 for version in version_list:
@@ -1358,13 +1550,24 @@ class MinecraftLauncher(QMainWindow):
                 for version in default_versions:
                     self.version_combo.addItem(version)
             
-            # Восстанавливаем последнюю использованную версию
+            # Восстанавливаем последнюю использованную версию или версию по умолчанию
             last_version = self.settings.get("last_version", "")
             if last_version:
                 index = self.version_combo.findText(last_version)
                 if index >= 0:
                     self.version_combo.setCurrentIndex(index)
+            else:
+                # Если последней версии нет, пробуем использовать версию по умолчанию
+                default_version = self.settings.get("default_version", "")
+                if default_version:
+                    index = self.version_combo.findText(default_version)
+                if index >= 0:
+                    self.version_combo.setCurrentIndex(index)
                     
+            # Reconnect the signal
+            self.version_combo.currentTextChanged.connect(self.version_changed)
+            # Обновляем информацию о выбранной версии
+            self.version_changed(self.version_combo.currentText())
         except Exception as e:
             QMessageBox.critical(
                 self,
@@ -1372,23 +1575,33 @@ class MinecraftLauncher(QMainWindow):
                 f"Не удалось обновить список версий: {str(e)}\n"
                 "Будут использованы базовые версии."
             )
-            # В случае критической ошибки добавляем базовые версии
-            default_versions = ["1.20.4", "1.20.2", "1.20.1", "1.19.4", "1.19.3", "1.19.2", "1.18.2"]
-            for version in default_versions:
-                self.version_combo.addItem(version)
-                
-        # Подключаем сигнал изменения версии
-        try:
-            self.version_combo.currentTextChanged.disconnect()
-        except:
-            pass
-        self.version_combo.currentTextChanged.connect(self.version_changed)
 
     def version_changed(self, version_text):
         """Сохраняет выбранную версию Minecraft"""
         if version_text:
             self.settings["last_version"] = version_text
             self.save_settings()
+            
+            # Проверяем существование атрибута version_cache и version_info
+            if hasattr(self, 'version_cache') and hasattr(self, 'version_info'):
+                # Обновляем информацию о версии
+                version_info = self.version_cache.get_version_info(version_text)
+                if version_info:
+                    # Проверяем, установлена ли версия
+                    installed_versions = minecraft_launcher_lib.utils.get_installed_versions(self.minecraft_directory)
+                    installed_version_ids = [v["id"] for v in installed_versions]
+                    version_info["is_installed"] = version_text in installed_version_ids
+                    
+                    # Добавляем информацию о том, что это версия по умолчанию
+                    default_version = self.settings.get("default_version", "")
+                    if version_text == default_version:
+                        version_info["is_default"] = True
+                    else:
+                        version_info["is_default"] = False
+                        
+                    self.version_info.update_info(version_info)
+                else:
+                    self.version_info.setVisible(False)
 
     def launch_minecraft(self):
         self.progress_bar.setVisible(False)
@@ -1513,10 +1726,36 @@ class MinecraftLauncher(QMainWindow):
             )
             
     def update_progress(self, value: int, status: str):
-        if value >= 0:
-            self.progress_bar.setValue(value)
+        """Обновляет прогресс установки версии"""
+        if not self.progress_bar.isVisible():
+            self.progress_bar.setVisible(True)
+            self.progress_label.setVisible(True)
+        
+        if value == -1:
+            self.progress_label.setText(status)
+            self.progress_bar.setMaximum(0)
+        else:
+            self.progress_bar.setMaximum(100)
+            self.progress_bar.setValueSmooth(value)
         if status:
             self.progress_label.setText(status)
+        
+        # Обновляем информацию о версии после успешной установки
+        if value == 100 and hasattr(self, 'version_cache') and hasattr(self, 'version_info'):
+            current_version = self.version_combo.currentText()
+            if current_version:
+                version_info = self.version_cache.get_version_info(current_version)
+                if version_info:
+                    version_info["is_installed"] = True
+                    self.version_cache.update_version_info(current_version, version_info)
+                    self.version_info.update_info(version_info)
+                    
+                    # Скрываем прогресс через небольшую задержку
+                    QTimer.singleShot(1000, lambda: self.hide_progress())
+    
+    def hide_progress(self):
+        self.progress_bar.setVisible(False)
+        self.progress_label.setVisible(False)
     
     def show_error(self, error: str):
         QMessageBox.critical(self, "Ошибка", f"Ошибка при установке: {error}")
@@ -1600,33 +1839,6 @@ class MinecraftLauncher(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Не удалось добавить профиль: {str(e)}")
 
-    def update_installed_versions(self):
-        self.versions_list.clear()
-        versions_dir = os.path.join(self.minecraft_directory, "versions")
-        if os.path.exists(versions_dir):
-            for version in os.listdir(versions_dir):
-                if os.path.isdir(os.path.join(versions_dir, version)):
-                    self.versions_list.addItem(version)
-
-    def delete_version(self):
-        current_item = self.versions_list.currentItem()
-        if current_item:
-            version = current_item.text()
-            reply = QMessageBox.question(
-                self,
-                "Подтверждение",
-                f"Вы уверены, что хотите удалить версию {version}?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                version_dir = os.path.join(self.minecraft_directory, "versions", version)
-                try:
-                    import shutil
-                    shutil.rmtree(version_dir)
-                    self.update_installed_versions()
-                except Exception as e:
-                    QMessageBox.critical(self, "Ошибка", f"Не удалось удалить версию: {str(e)}")
-
     def upload_skin(self):
         file_dialog = QFileDialog()
         skin_path, _ = file_dialog.getOpenFileName(
@@ -1662,6 +1874,10 @@ class MinecraftLauncher(QMainWindow):
             
             version_types_str = ", ".join(version_types)
             
+            # Получаем версию по умолчанию
+            default_version = self.settings.get('default_version', "")
+            default_version_str = default_version if default_version else "Не задана"
+            
             # Форматируем информацию о последней проверке обновлений
             last_check = self.settings.get('last_update_check', "")
             last_check_info = "Никогда" if not last_check else last_check
@@ -1673,6 +1889,7 @@ class MinecraftLauncher(QMainWindow):
 
 Версии:
 - Отображаемые типы: {version_types_str}
+- Версия по умолчанию: {default_version_str}
 
 Директории:
 - Загрузка: {os.path.basename(self.settings.get('download_location', self.minecraft_directory))}
@@ -1686,8 +1903,13 @@ class MinecraftLauncher(QMainWindow):
             """
             self.settings_info.setText(info_text.strip())
 
+    def update_default_version_combo(self):
+        pass
+
     def save_versions_settings(self):
+        """Сохраняет настройки версий"""
         try:
+            # Сохраняем настройки отображения типов версий
             self.settings["show_release"] = self.show_release_checkbox.isChecked()
             self.settings["show_snapshot"] = self.show_snapshot_checkbox.isChecked()
             self.settings["show_beta"] = self.show_beta_checkbox.isChecked()
@@ -1707,22 +1929,17 @@ class MinecraftLauncher(QMainWindow):
             self.save_settings()
             self.update_settings_info()
             
-            # Запоминаем текущую версию
-            current_version = self.version_combo.currentText()
-            
-            # Обновляем список версий с новыми настройками
+            # Обновляем список версий в главном окне
             self.update_versions()
-            
-            # Пытаемся восстановить выбранную версию
-            if current_version:
-                index = self.version_combo.findText(current_version)
-                if index >= 0:
-                    self.version_combo.setCurrentIndex(index)
             
             QMessageBox.information(self, "Успешно", "Настройки версий сохранены")
             
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить настройки версий: {str(e)}")
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось сохранить настройки версий: {str(e)}"
+            )
 
     def setup_system_tray(self):
         """Настройка значка в системном трее"""
@@ -2033,11 +2250,12 @@ class MinecraftLauncher(QMainWindow):
         reply = QMessageBox.question(
             self,
             "Подтверждение сброса",
-            "Вы уверены, что хотите сбросить все настройки лаунчера на значения по умолчанию?",
+            "Вы уверены, что хотите сбросить все настройки лаунчера на значения по умолчанию?\n\n"
+            "Это не затронет ваши профили и установленные версии Minecraft.",
             QMessageBox.Yes | QMessageBox.No
         )
         
-        if reply == QMessageBox.No:
+        if reply != QMessageBox.Yes:
             return
             
         try:
@@ -2063,7 +2281,8 @@ class MinecraftLauncher(QMainWindow):
                 "additional_arguments": "",
                 "last_update_check": "",
                 "last_profile_index": 0,
-                "last_version": ""
+                "last_version": "",
+                "default_version": ""
             }
             
             # Сохраняем настройки по умолчанию
@@ -2094,6 +2313,10 @@ class MinecraftLauncher(QMainWindow):
             self.close_launcher_combo.setCurrentText(self.settings.get("close_launcher", "Нет"))
             self.additional_args_input.setText(self.settings.get("additional_arguments", ""))
             
+            # Обновляем список версий
+            self.refresh_settings_versions()
+            self.update_versions()
+            
             QMessageBox.information(
                 self,
                 "Сброс настроек",
@@ -2108,14 +2331,8 @@ class MinecraftLauncher(QMainWindow):
             )
 
     def load_settings(self):
-        try:
-            self.settings = {}
-            settings_file = os.path.join(self.nova_directory, "launcher_settings.json")
-            if os.path.exists(settings_file):
-                with open(settings_file, "r", encoding='utf-8') as f:
-                    self.settings = json.load(f)
-            if not self.settings:
-                self.settings = {
+        """Загружает настройки лаунчера"""
+        default_settings = {
                     "min_memory": 2048,
                     "max_memory": 4096,
                     "font_size": 10,
@@ -2133,31 +2350,22 @@ class MinecraftLauncher(QMainWindow):
                     "additional_arguments": "",
                     "last_update_check": "",
                     "last_profile_index": 0,
-                    "last_version": ""
-                }
-                self.save_settings()
+            "last_version": "",
+            "default_version": "",
+            "experimental_features": False
+        }
+        
+        try:
+            settings_file = os.path.join(self.nova_directory, "launcher_settings.json")
+            if os.path.exists(settings_file):
+                with open(settings_file, "r", encoding='utf-8') as f:
+                    loaded_settings = json.load(f)
+                    # Обновляем дефолтные настройки загруженными
+                    default_settings.update(loaded_settings)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить настройки: {str(e)}")
-            self.settings = {
-                "min_memory": 2048,
-                "max_memory": 4096,
-                "font_size": 10,
-                "auto_update": "Включено",
-                "close_launcher": "Нет",
-                "show_release": True,
-                "show_snapshot": False,
-                "show_beta": False,
-                "show_alpha": False,
-                "show_tray_icon": True,
-                "minimize_to_tray": True,
-                "auto_check_updates": True,
-                "download_location": self.minecraft_directory,
-                "java_path": "",
-                "additional_arguments": "",
-                "last_update_check": "",
-                "last_profile_index": 0,
-                "last_version": ""
-            }
+            print(f"Ошибка при загрузке настроек: {str(e)}")
+            
+        return default_settings
 
     def save_settings(self):
         try:
@@ -2396,6 +2604,663 @@ class MinecraftLauncher(QMainWindow):
         layout.addWidget(container)
         return page
 
+    def create_mods_page(self):
+        """Создает страницу управления модами"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 40, 40, 40)
+        
+        # Заголовок
+        title_label = QLabel("Управление модами")
+        title_label.setFont(self.minecraft_font)
+        title_label.setStyleSheet("font-size: 24px;")
+        layout.addWidget(title_label)
+        
+        # Выбор версии для модов
+        version_layout = QHBoxLayout()
+        version_label = QLabel("Версия:")
+        version_label.setFont(self.minecraft_font)
+        self.mods_version_combo = QComboBox()
+        self.mods_version_combo.setFont(self.minecraft_font)
+        self.update_mods_versions()
+        version_layout.addWidget(version_label)
+        version_layout.addWidget(self.mods_version_combo)
+        version_layout.addStretch()
+        layout.addLayout(version_layout)
+        
+        # Список установленных модов
+        mods_group = QGroupBox("Установленные моды")
+        mods_group.setFont(self.minecraft_font)
+        mods_layout = QVBoxLayout(mods_group)
+        
+        self.mods_list = QListWidget()
+        self.mods_list.setFont(self.minecraft_font)
+        self.mods_list.currentItemChanged.connect(self.mod_selected)  # Добавляем обработчик выбора мода
+        mods_layout.addWidget(self.mods_list)
+        
+        # Кнопки управления модами
+        buttons_layout = QHBoxLayout()
+        
+        add_mod_button = QPushButton("Добавить мод")
+        add_mod_button.setFont(self.minecraft_font)
+        add_mod_button.clicked.connect(self.add_mod)
+        
+        delete_mod_button = QPushButton("Удалить")
+        delete_mod_button.setFont(self.minecraft_font)
+        delete_mod_button.clicked.connect(self.delete_mod)
+        
+        enable_mod_button = QPushButton("Включить/Выключить")
+        enable_mod_button.setFont(self.minecraft_font)
+        enable_mod_button.clicked.connect(self.toggle_mod)
+        
+        open_mods_folder_button = QPushButton("Открыть папку")
+        open_mods_folder_button.setFont(self.minecraft_font)
+        open_mods_folder_button.clicked.connect(self.open_mods_folder)
+        
+        buttons_layout.addWidget(add_mod_button)
+        buttons_layout.addWidget(delete_mod_button)
+        buttons_layout.addWidget(enable_mod_button)
+        buttons_layout.addWidget(open_mods_folder_button)
+        buttons_layout.addStretch()
+        
+        mods_layout.addLayout(buttons_layout)
+        layout.addWidget(mods_group)
+        
+        # Информация о моде
+        info_group = QGroupBox("Информация о моде")
+        info_group.setFont(self.minecraft_font)
+        info_layout = QVBoxLayout(info_group)
+        
+        self.mod_info_label = QLabel()
+        self.mod_info_label.setFont(self.minecraft_font)
+        self.mod_info_label.setWordWrap(True)
+        info_layout.addWidget(self.mod_info_label)
+        
+        layout.addWidget(info_group)
+        
+        # Обновляем список модов
+        self.update_mods_list()
+        
+        # Добавляем кнопки для установки Forge/Fabric
+        loader_buttons = QHBoxLayout()
+        
+        install_forge_button = QPushButton("Установить Forge")
+        install_forge_button.setFont(self.minecraft_font)
+        install_forge_button.clicked.connect(self.install_forge)
+        
+        install_fabric_button = QPushButton("Установить Fabric")
+        install_fabric_button.setFont(self.minecraft_font)
+        install_fabric_button.clicked.connect(self.install_fabric)
+        
+        loader_buttons.addWidget(install_forge_button)
+        loader_buttons.addWidget(install_fabric_button)
+        loader_buttons.addStretch()
+        
+        layout.addLayout(loader_buttons)
+        
+        return page
+        
+    def update_mods_versions(self):
+        """Обновляет список версий для модов"""
+        self.mods_version_combo.clear()
+        try:
+            installed_versions = minecraft_launcher_lib.utils.get_installed_versions(self.minecraft_directory)
+            for version in installed_versions:
+                self.mods_version_combo.addItem(version["id"])
+        except Exception as e:
+            QMessageBox.warning(self, "Внимание", f"Не удалось загрузить список версий: {str(e)}")
+    
+    def get_mods_directory(self):
+        """Возвращает путь к папке с модами для текущей версии"""
+        version = self.mods_version_combo.currentText()
+        if not version:
+            return None
+        return os.path.join(self.minecraft_directory, "mods", version)
+    
+    def update_mods_list(self):
+        """Обновляет список установленных модов"""
+        self.mods_list.clear()
+        mods_dir = self.get_mods_directory()
+        if not mods_dir or not os.path.exists(mods_dir):
+            return
+            
+        for file in os.listdir(mods_dir):
+            if file.endswith(".jar") or file.endswith(".disabled"):
+                item = QListWidgetItem(file)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if file.endswith(".jar") else Qt.Unchecked)
+                self.mods_list.addItem(item)
+    
+    def add_mod(self):
+        """Добавляет новый мод"""
+        mods_dir = self.get_mods_directory()
+        if not mods_dir:
+            QMessageBox.warning(self, "Внимание", "Выберите версию для установки мода")
+            return
+            
+        if not os.path.exists(mods_dir):
+            os.makedirs(mods_dir)
+            
+        file_dialog = QFileDialog()
+        mod_files, _ = file_dialog.getOpenFileNames(
+            self,
+            "Выберите файлы модов",
+            "",
+            "Файлы модов (*.jar)"
+        )
+        
+        if mod_files:
+            for mod_file in mod_files:
+                try:
+                    import shutil
+                    shutil.copy2(mod_file, mods_dir)
+                except Exception as e:
+                    QMessageBox.critical(self, "Ошибка", f"Не удалось установить мод {os.path.basename(mod_file)}: {str(e)}")
+            
+            self.update_mods_list()
+    
+    def delete_mod(self):
+        """Удаляет выбранный мод"""
+        current_item = self.mods_list.currentItem()
+        if not current_item:
+            return
+            
+        mod_name = current_item.text()
+        mods_dir = self.get_mods_directory()
+        
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение",
+            f"Вы уверены, что хотите удалить мод {mod_name}?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                os.remove(os.path.join(mods_dir, mod_name))
+                self.update_mods_list()
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось удалить мод: {str(e)}")
+    
+    def toggle_mod(self):
+        """Включает/выключает выбранный мод"""
+        current_item = self.mods_list.currentItem()
+        if not current_item:
+            return
+            
+        mod_name = current_item.text()
+        mods_dir = self.get_mods_directory()
+        
+        try:
+            old_path = os.path.join(mods_dir, mod_name)
+            if mod_name.endswith(".disabled"):
+                new_name = mod_name[:-9] + ".jar"
+                current_item.setCheckState(Qt.Checked)
+            else:
+                new_name = mod_name[:-4] + ".jar.disabled"
+                current_item.setCheckState(Qt.Unchecked)
+            
+            new_path = os.path.join(mods_dir, new_name)
+            os.rename(old_path, new_path)
+            current_item.setText(new_name)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось изменить состояние мода: {str(e)}")
+    
+    def open_mods_folder(self):
+        """Открывает папку с модами"""
+        mods_dir = self.get_mods_directory()
+        if not mods_dir:
+            QMessageBox.warning(self, "Внимание", "Выберите версию для просмотра модов")
+            return
+            
+        if not os.path.exists(mods_dir):
+            os.makedirs(mods_dir)
+            
+        if sys.platform == "win32":
+            os.startfile(mods_dir)
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", mods_dir])
+
+    def read_mod_info(self, mod_path):
+        """Читает информацию о моде из JAR файла"""
+        try:
+            import zipfile
+            import json
+            
+            with zipfile.ZipFile(mod_path, 'r') as jar:
+                # Пытаемся найти fabric.mod.json или mods.toml
+                if 'fabric.mod.json' in jar.namelist():
+                    with jar.open('fabric.mod.json') as f:
+                        data = json.load(f)
+                        return {
+                            'name': data.get('name', 'Неизвестно'),
+                            'id': data.get('id', 'Неизвестно'),
+                            'version': data.get('version', 'Неизвестно'),
+                            'description': data.get('description', 'Описание отсутствует'),
+                            'authors': ', '.join(data.get('authors', [])),
+                            'type': 'Fabric'
+                        }
+                elif 'META-INF/mods.toml' in jar.namelist():
+                    with jar.open('META-INF/mods.toml') as f:
+                        content = f.read().decode('utf-8')
+                        # Простой парсер TOML
+                        info = {}
+                        current_section = None
+                        for line in content.split('\n'):
+                            line = line.strip()
+                            if line.startswith('[[mods]]'):
+                                current_section = 'mods'
+                            elif '=' in line and current_section == 'mods':
+                                key, value = line.split('=', 1)
+                                info[key.strip()] = value.strip().strip('"\'')
+                        return {
+                            'name': info.get('displayName', 'Неизвестно'),
+                            'id': info.get('modId', 'Неизвестно'),
+                            'version': info.get('version', 'Неизвестно'),
+                            'description': info.get('description', 'Описание отсутствует'),
+                            'authors': info.get('authors', 'Неизвестно'),
+                            'type': 'Forge'
+                        }
+                else:
+                    # Пытаемся найти mcmod.info (для старых модов)
+                    for file in jar.namelist():
+                        if file.endswith('mcmod.info'):
+                            with jar.open(file) as f:
+                                try:
+                                    data = json.load(f)
+                                    if isinstance(data, list):
+                                        mod_info = data[0]
+                                    else:
+                                        mod_info = data.get('modList', [{}])[0]
+                                    return {
+                                        'name': mod_info.get('name', 'Неизвестно'),
+                                        'id': mod_info.get('modid', 'Неизвестно'),
+                                        'version': mod_info.get('version', 'Неизвестно'),
+                                        'description': mod_info.get('description', 'Описание отсутствует'),
+                                        'authors': mod_info.get('authors', 'Неизвестно'),
+                                        'type': 'Legacy'
+                                    }
+                                except:
+                                    pass
+            
+            # Если не удалось найти информацию
+            return {
+                'name': os.path.basename(mod_path),
+                'id': 'Неизвестно',
+                'version': 'Неизвестно',
+                'description': 'Информация о моде не найдена',
+                'authors': 'Неизвестно',
+                'type': 'Неизвестно'
+            }
+        except Exception as e:
+            return {
+                'name': os.path.basename(mod_path),
+                'id': 'Ошибка',
+                'version': 'Ошибка',
+                'description': f'Ошибка чтения информации: {str(e)}',
+                'authors': 'Неизвестно',
+                'type': 'Ошибка'
+            }
+
+    def mod_selected(self, current, previous):
+        """Обрабатывает выбор мода в списке"""
+        if not current:
+            self.mod_info_label.setText("")
+            return
+            
+        mod_name = current.text()
+        mods_dir = self.get_mods_directory()
+        if not mods_dir:
+            return
+            
+        mod_path = os.path.join(mods_dir, mod_name)
+        if not os.path.exists(mod_path):
+            return
+            
+        # Читаем информацию о моде
+        info = self.read_mod_info(mod_path)
+        
+        # Форматируем и отображаем информацию
+        info_text = f"""
+        <b>Название:</b> {info['name']}
+        <b>ID:</b> {info['id']}
+        <b>Версия:</b> {info['version']}
+        <b>Тип:</b> {info['type']}
+        <b>Авторы:</b> {info['authors']}
+        
+        <b>Описание:</b>
+        {info['description']}
+        """
+        
+        self.mod_info_label.setText(info_text)
+
+    def install_forge(self):
+        """Устанавливает Forge для выбранной версии"""
+        if not self.settings.get("experimental_features", False):
+            QMessageBox.warning(
+                self,
+                "Экспериментальная функция",
+                "Установка Forge доступна только при включенных экспериментальных функциях.\n"
+                "Включите их в настройках лаунчера."
+            )
+            return
+            
+        version = self.mods_version_combo.currentText()
+        if not version:
+            QMessageBox.warning(self, "Внимание", "Выберите версию Minecraft")
+            return
+            
+        try:
+            # Получаем список доступных версий Forge
+            response = requests.get(f"https://files.minecraftforge.net/maven/net/minecraftforge/forge/maven-metadata.xml")
+            if response.status_code != 200:
+                raise Exception("Не удалось получить список версий Forge")
+                
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(response.content)
+            versions = []
+            for version_element in root.findall(".//version"):
+                if version in version_element.text:
+                    versions.append(version_element.text)
+            
+            if not versions:
+                QMessageBox.warning(self, "Внимание", f"Forge не найден для версии {version}")
+                return
+                
+            # Сортируем версии и берем последнюю
+            versions.sort(reverse=True)
+            forge_version = versions[0]
+            
+            # Скачиваем установщик
+            installer_url = f"https://files.minecraftforge.net/maven/net/minecraftforge/forge/{forge_version}/forge-{forge_version}-installer.jar"
+            installer_path = os.path.join(self.minecraft_directory, "forge-installer.jar")
+            
+            response = requests.get(installer_url, stream=True)
+            with open(installer_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            # Запускаем установщик
+            java_path = self.settings.get("java_path", "java")
+            process = subprocess.Popen([java_path, "-jar", installer_path])
+            
+            QMessageBox.information(
+                self,
+                "Установка Forge",
+                "Запущен установщик Forge. Следуйте инструкциям в открывшемся окне."
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось установить Forge: {str(e)}")
+            
+    def install_fabric(self):
+        """Устанавливает Fabric для выбранной версии"""
+        if not self.settings.get("experimental_features", False):
+            QMessageBox.warning(
+                self,
+                "Экспериментальная функция",
+                "Установка Fabric доступна только при включенных экспериментальных функциях.\n"
+                "Включите их в настройках лаунчера."
+            )
+            return
+            
+        version = self.mods_version_combo.currentText()
+        if not version:
+            QMessageBox.warning(self, "Внимание", "Выберите версию Minecraft")
+            return
+            
+        try:
+            # Получаем список версий Fabric
+            response = requests.get("https://meta.fabricmc.net/v2/versions/installer")
+            if response.status_code != 200:
+                raise Exception("Не удалось получить список версий Fabric")
+                
+            installers = response.json()
+            if not installers:
+                raise Exception("Список установщиков Fabric пуст")
+                
+            # Берем последнюю версию установщика
+            installer_url = installers[0]["url"]
+            
+            # Скачиваем установщик
+            installer_path = os.path.join(self.minecraft_directory, "fabric-installer.jar")
+            response = requests.get(installer_url, stream=True)
+            with open(installer_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            # Запускаем установщик
+            java_path = self.settings.get("java_path", "java")
+            process = subprocess.Popen([
+                java_path,
+                "-jar",
+                installer_path,
+                "client",
+                "-mcversion",
+                version
+            ])
+            
+            QMessageBox.information(
+                self,
+                "Установка Fabric",
+                "Запущен установщик Fabric. Следуйте инструкциям в открывшемся окне."
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось установить Fabric: {str(e)}")
+
+    def refresh_settings_versions(self):
+        pass
+
+    def delete_version_from_settings(self):
+        pass
+
+    def set_default_version(self):
+        pass
+
+    def create_dirs_tab(self):
+        """Создает вкладку настроек директорий"""
+        dirs_tab = QWidget()
+        dirs_layout = QVBoxLayout(dirs_tab)
+        
+        dirs_description = QLabel("Управление директориями:")
+        dirs_description.setFont(self.minecraft_font)
+        dirs_layout.addWidget(dirs_description)
+        
+        # Поле для выбора директории загрузки
+        download_layout = QHBoxLayout()
+        download_label = QLabel("Директория загрузок:")
+        download_label.setFont(self.minecraft_font)
+        
+        self.download_location_input = QLineEdit()
+        self.download_location_input.setFont(self.minecraft_font)
+        self.download_location_input.setText(self.settings.get("download_location", self.minecraft_directory))
+        
+        browse_download_button = QPushButton("Обзор")
+        browse_download_button.setFont(self.minecraft_font)
+        browse_download_button.clicked.connect(self.browse_download_location)
+        
+        download_layout.addWidget(download_label)
+        download_layout.addWidget(self.download_location_input)
+        download_layout.addWidget(browse_download_button)
+        
+        # Поле для выбора пути к Java
+        java_layout = QHBoxLayout()
+        java_label = QLabel("Путь к Java:")
+        java_label.setFont(self.minecraft_font)
+        
+        self.java_path_input = QLineEdit()
+        self.java_path_input.setFont(self.minecraft_font)
+        self.java_path_input.setText(self.settings.get("java_path", ""))
+        self.java_path_input.setPlaceholderText("Оставьте пустым для автоматического выбора")
+        
+        browse_java_button = QPushButton("Обзор")
+        browse_java_button.setFont(self.minecraft_font)
+        browse_java_button.clicked.connect(self.browse_java_path)
+        
+        java_layout.addWidget(java_label)
+        java_layout.addWidget(self.java_path_input)
+        java_layout.addWidget(browse_java_button)
+        
+        dirs_layout.addLayout(download_layout)
+        dirs_layout.addLayout(java_layout)
+        dirs_layout.addStretch()
+        
+        return dirs_tab
+
+    def create_advanced_tab(self):
+        """Создает вкладку дополнительных настроек"""
+        advanced_tab = QWidget()
+        advanced_layout = QVBoxLayout(advanced_tab)
+        
+        # Группа управления лаунчером
+        launcher_group = QWidget()
+        launcher_form = QFormLayout(launcher_group)
+        
+        # Чекбоксы для настроек
+        self.show_tray_checkbox = QCheckBox("Показывать значок в трее")
+        self.show_tray_checkbox.setFont(self.minecraft_font)
+        self.show_tray_checkbox.setChecked(self.settings.get("show_tray_icon", True))
+        
+        self.minimize_to_tray_checkbox = QCheckBox("Сворачивать в трей при закрытии")
+        self.minimize_to_tray_checkbox.setFont(self.minecraft_font)
+        self.minimize_to_tray_checkbox.setChecked(self.settings.get("minimize_to_tray", True))
+        
+        self.auto_check_updates_checkbox = QCheckBox("Автоматически проверять обновления")
+        self.auto_check_updates_checkbox.setFont(self.minecraft_font)
+        self.auto_check_updates_checkbox.setChecked(self.settings.get("auto_check_updates", True))
+        
+        # Добавляем чекбокс для экспериментальных функций
+        self.experimental_features_checkbox = QCheckBox("Включить экспериментальные функции")
+        self.experimental_features_checkbox.setFont(self.minecraft_font)
+        self.experimental_features_checkbox.setChecked(self.settings.get("experimental_features", False))
+        self.experimental_features_checkbox.stateChanged.connect(self.toggle_experimental_features)
+        
+        # Добавляем метку с предупреждением
+        experimental_warning = QLabel("⚠️ Экспериментальные функции могут работать нестабильно")
+        experimental_warning.setFont(self.minecraft_font)
+        experimental_warning.setStyleSheet("color: #FFA500;")  # Оранжевый цвет для предупреждения
+        
+        # Комбобоксы для дополнительных настроек
+        self.auto_update_combo = QComboBox()
+        self.auto_update_combo.setFont(self.minecraft_font)
+        self.auto_update_combo.addItems(["Включено", "Выключено"])
+        self.auto_update_combo.setCurrentText(self.settings.get("auto_update", "Включено"))
+        
+        self.close_launcher_combo = QComboBox()
+        self.close_launcher_combo.setFont(self.minecraft_font)
+        self.close_launcher_combo.addItems(["Да", "Нет"])
+        self.close_launcher_combo.setCurrentText(self.settings.get("close_launcher", "Нет"))
+        
+        # Поле для дополнительных аргументов Java
+        self.additional_args_input = QLineEdit()
+        self.additional_args_input.setFont(self.minecraft_font)
+        self.additional_args_input.setText(self.settings.get("additional_arguments", ""))
+        self.additional_args_input.setPlaceholderText("Например: -XX:+UseConcMarkSweepGC")
+        
+        # Добавляем элементы в форму
+        launcher_form.addRow("Обновление Minecraft:", self.auto_update_combo)
+        launcher_form.addRow("Закрывать лаунчер при запуске игры:", self.close_launcher_combo)
+        advanced_layout.addWidget(launcher_group)
+        advanced_layout.addWidget(self.show_tray_checkbox)
+        advanced_layout.addWidget(self.minimize_to_tray_checkbox)
+        advanced_layout.addWidget(self.auto_check_updates_checkbox)
+        advanced_layout.addWidget(self.experimental_features_checkbox)
+        advanced_layout.addWidget(experimental_warning)
+        
+        advanced_layout.addWidget(QLabel("Дополнительные аргументы Java:"))
+        advanced_layout.addWidget(self.additional_args_input)
+        advanced_layout.addStretch()
+        
+        return advanced_tab
+
+    def create_data_tab(self):
+        """Создает вкладку управления данными"""
+        data_tab = QWidget()
+        data_layout = QVBoxLayout(data_tab)
+        
+        data_description = QLabel("Управление данными лаунчера:")
+        data_description.setFont(self.minecraft_font)
+        data_description.setWordWrap(True)
+        data_layout.addWidget(data_description)
+        
+        # Кнопки для управления данными
+        backup_button = QPushButton("Создать резервную копию")
+        backup_button.setFont(self.minecraft_font)
+        backup_button.clicked.connect(self.create_backup)
+        
+        restore_button = QPushButton("Восстановить из резервной копии")
+        restore_button.setFont(self.minecraft_font)
+        restore_button.clicked.connect(self.restore_from_backup)
+        
+        reset_button = QPushButton("Сбросить настройки лаунчера")
+        reset_button.setFont(self.minecraft_font)
+        reset_button.clicked.connect(self.reset_launcher_settings)
+        
+        data_layout.addWidget(backup_button)
+        data_layout.addWidget(restore_button)
+        data_layout.addWidget(reset_button)
+        data_layout.addStretch()
+        
+        return data_tab
+
+    def toggle_experimental_features(self, state):
+        """Обработчик включения/выключения экспериментальных функций"""
+        self.settings["experimental_features"] = bool(state)
+        self.save_settings()
+        
+        # Показываем сообщение о необходимости перезапуска
+        QMessageBox.information(
+            self,
+            "Экспериментальные функции",
+            "Для применения изменений требуется перезапуск лаунчера."
+        )
+
+    def create_sidebar_buttons(self):
+        """Создает и добавляет кнопки в боковую панель"""
+        # Определяем доступные страницы в зависимости от настроек
+        pages = [
+            ("ИГРАТЬ", self.play_page),
+            ("СКИНЫ", self.skins_page),
+            ("НОВОСТИ", self.news_page),
+            ("НАСТРОЙКИ", self.settings_page),
+            ("СООБЩЕСТВО", self.social_page)
+        ]
+        
+        # Добавляем вкладку модов только если включены экспериментальные функции
+        if self.settings.get("experimental_features", False):
+            pages.insert(2, ("МОДЫ", self.mods_page))
+
+        # Очищаем существующие кнопки
+        self.sidebar_buttons.clear()
+        for i in range(self.content_stack.count()):
+            self.content_stack.removeWidget(self.content_stack.widget(0))
+
+        # Получаем layout боковой панели
+        sidebar = self.findChild(QWidget, "sidebar")
+        if not sidebar:
+            return
+        sidebar_layout = sidebar.layout()
+
+        # Добавляем кнопки и страницы
+        for i, (text, page) in enumerate(pages):
+            button = SidebarButton(text, self)
+            button.setObjectName("sidebarButton")
+            button.clicked.connect(lambda checked, index=i: self.change_page(index))
+            
+            # Добавляем кнопку в layout боковой панели перед растяжкой
+            # (предпоследний элемент, так как последний - это версия лаунчера)
+            sidebar_layout.insertWidget(sidebar_layout.count() - 2, button)
+            
+            self.sidebar_buttons.append(button)
+            self.content_stack.addWidget(page)
+
+        # Выбираем первую страницу
+        if self.sidebar_buttons:
+            self.sidebar_buttons[0].setChecked(True)
+            self.content_stack.setCurrentIndex(0)
+
 class MinecraftNewsThread(QThread):
     news_loaded = Signal(list)
     error = Signal(str)
@@ -2423,13 +3288,13 @@ class MinecraftNewsThread(QThread):
             # Если не удалось получить новости с официального API, добавляем собственные
             if not news_items:
                 news_items = [
-                    ("Nova Launcher 1.4", "Полный редизайн и оптимизация лаунчера с автоматическими обновлениями"),
+                    ("Nova Launcher 1.5", "Обновление Angel Falling с улучшенной системой выбора версий и стабильности, улучшение splash screen и анимации перехода между страницами"),
+                    ("Улучшенный выбор версий", "Переработана система выбора и установки версий Minecraft"),
                     ("Minecraft 1.20.4", """1.20.4 - стабильное обновление для Java Edition, вышедшее на релиз 1 декабря 2023 года. 
 В этом обновлении были добавлены улучшения производительности, исправления багов 
 и внесены важные изменения в игровую механику."""),
-                    ("Готовность к обновлениям", "Nova Launcher теперь поддерживает все типы версий Minecraft: релизы, снапшоты, бета и альфа версии."),
-                    ("Системный трей", "Лаунчер может работать в фоновом режиме через системный трей."),
-                    ("Расширенные настройки", "Добавлены новые возможности настройки Java, памяти и профилей.")
+                    ("Системный трей", "Лаунчер может работать в фоновом режиме через системный трей"),
+                    ("Расширенные настройки", "Улучшенные возможности настройки Java, памяти и профилей")
                 ]
                 
             self.news_loaded.emit(news_items)
@@ -2438,9 +3303,9 @@ class MinecraftNewsThread(QThread):
             
             # В случае ошибки используем стандартные новости
             default_news = [
-                ("Nova Launcher 1.4", "Полный редизайн и оптимизация лаунчера"),
+                ("Nova Launcher 1.5", "Обновление Angel Falling с улучшенной системой выбора версий, улучшение splash screen и анимации перехода между страницами"),
                 ("Minecraft 1.20.4", "Стабильная версия с исправлениями ошибок"),
-                ("Функции лаунчера", "Поддержка всех типов версий Minecraft")
+                ("Функции лаунчера", "Улучшенная поддержка всех типов версий Minecraft")
             ]
             self.news_loaded.emit(default_news)
 
@@ -2839,16 +3704,24 @@ class SmoothStackedWidget(QStackedWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.m_direction = Qt.Horizontal
-        self.m_speed = 300
-        self.m_animationtype = QEasingCurve.OutCubic
+        self.m_speed = 800
+        self.m_animationtype = QEasingCurve.OutExpo
         self.m_now = 0
         self.m_next = 0
         self.m_wrap = False
         self.m_pnow = QPoint(0, 0)
         self.m_active = False
 
-    def setDirection(self, direction):
-        self.m_direction = direction
+        # Создаем слои для эффекта размытия движения
+        self.motion_layers = []
+        for i in range(3):
+            layer = QWidget(self)
+            layer.setStyleSheet(f"background-color: rgba(0, 0, 0, {0.1 * (i + 1)});")
+            layer.hide()
+            self.motion_layers.append(layer)
+            
+        # Храним группу анимаций как атрибут класса
+        self.anim_group = None
 
     def setSpeed(self, speed):
         self.m_speed = speed
@@ -2870,10 +3743,17 @@ class SmoothStackedWidget(QStackedWidget):
             self.slideInIdx(now - 1)
 
     def slideInIdx(self, idx):
+        if self.m_active:
+            return
+            
         if idx > self.count() - 1:
             idx = idx % self.count()
         elif idx < 0:
             idx = (idx + self.count()) % self.count()
+            
+        if idx == self.currentIndex():
+            return
+            
         self.slideInWgt(self.widget(idx))
 
     def slideInWgt(self, newwidget):
@@ -2917,52 +3797,144 @@ class SmoothStackedWidget(QStackedWidget):
         self.widget(_next).show()
         self.widget(_next).raise_()
 
-        anim_group = QParallelAnimationGroup(self)
+        # Настраиваем слои для эффекта размытия
+        for i, layer in enumerate(self.motion_layers):
+            layer.setGeometry(self.rect())
+            layer.show()
+            layer.raise_()
+            
+            # Устанавливаем начальные позиции слоев с небольшим смещением
+            offset_factor = 0.2 * (i + 1)
+            layer_offset = QPoint(int(offsetx * offset_factor), int(offsety * offset_factor))
+            layer.move(pnow + layer_offset)
 
+        # Очищаем предыдущую группу анимаций, если она существует
+        if self.anim_group is not None:
+            self.anim_group.stop()
+            self.anim_group.deleteLater()
+
+        # Создаем новую группу анимаций
+        self.anim_group = QParallelAnimationGroup(self)
+
+        # Анимации для основных виджетов
         for index, start, end in zip((_now, _next), (pnow, pnext - offset), (pnow + offset, pnext)):
             animation = QPropertyAnimation(self.widget(index), b"pos", self)
             animation.setDuration(self.m_speed)
             animation.setEasingCurve(self.m_animationtype)
             animation.setStartValue(start)
             animation.setEndValue(end)
-            anim_group.addAnimation(animation)
+            self.anim_group.addAnimation(animation)
 
-        anim_group.finished.connect(self.animationDoneSlot)
+        # Анимации для слоев размытия
+        for i, layer in enumerate(self.motion_layers):
+            delay_factor = 0.15 * (i + 1)
+            layer_anim = QPropertyAnimation(layer, b"pos", self)
+            layer_anim.setStartValue(pnow)
+            layer_anim.setEndValue(pnow + offset)
+            layer_anim.setDuration(int(self.m_speed * (1 + delay_factor)))
+            layer_anim.setEasingCurve(self.m_animationtype)
+            self.anim_group.addAnimation(layer_anim)
+
+        self.anim_group.finished.connect(self.animationDoneSlot)
         self.m_next = _next
         self.m_now = _now
         self.m_active = True
-        anim_group.start(QAbstractAnimation.DeleteWhenStopped)
+        self.anim_group.start()
 
     def animationDoneSlot(self):
+        # Скрываем слои размытия
+        for layer in self.motion_layers:
+            layer.hide()
+            
         self.setCurrentIndex(self.m_next)
         self.widget(self.m_now).hide()
         self.m_active = False
+        
+        # Очищаем группу анимаций
+        if self.anim_group is not None:
+            self.anim_group.deleteLater()
+            self.anim_group = None
+
+class SimpleProgressBar(QProgressBar):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(4)
+        self.setTextVisible(False)
+        self.setValue(0)
+        
+        # Устанавливаем стиль прогресс-бара с градиентом
+        self.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                background: rgba(255, 255, 255, 0.08);
+                border-radius: 2px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #43A047, 
+                    stop:0.5 #4CAF50, 
+                    stop:1 #66BB6A);
+                border-radius: 2px;
+            }
+        """)
+        
+        # Создаем анимацию для плавного увеличения значения
+        self.animation = QPropertyAnimation(self, b"value")
+        self.animation.setEasingCurve(QEasingCurve.OutCubic)
+        
+    def setValueSmooth(self, value, duration=500):
+        """Плавно устанавливает значение прогресс-бара с указанной длительностью"""
+        self.animation.stop()
+        self.animation.setStartValue(self.value())
+        self.animation.setEndValue(value)
+        self.animation.setDuration(duration)
+        self.animation.start()
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    
-    # Создаем и показываем сплэш скрин
-    splash = LoadingSplash()
-    splash.show()
-    
-    # Создаем главное окно, но пока не показываем его
-    window = MinecraftLauncher()
-    
-    # Запускаем прогресс загрузки
-    splash.start_progress()
-    
-    # Создаем таймер для проверки завершения загрузки
-    check_timer = QTimer()
-    
-    def check_loading():
-        if splash.loading_finished:
-            check_timer.stop()
-            # Запускаем анимацию скрытия сплэш скрина
-            splash.finish(window)
-            # Показываем главное окно после небольшой задержки
-            QTimer.singleShot(800, window.show)
-    
-    check_timer.timeout.connect(check_loading)
-    check_timer.start(100)
-    
-    sys.exit(app.exec()) 
+    app = None
+    try:
+        # Создаем приложение
+        app = QApplication(sys.argv)
+        
+        # Создаем и показываем сплэш скрин
+        splash = LoadingSplash()
+        
+        # Обрабатываем события, чтобы показать splash screen сразу
+        app.processEvents()
+        
+        # Запускаем прогресс загрузки
+        splash.start_progress()
+        
+        # Еще раз обрабатываем события для обновления интерфейса
+        app.processEvents()
+        
+        # Создаем главное окно, но пока не показываем его
+        window = MinecraftLauncher()
+        
+        # Создаем таймер для проверки завершения загрузки
+        check_timer = QTimer()
+        
+        def check_loading():
+            try:
+                # Если загрузка завершена, переходим к основному окну
+                if splash and splash.loading_finished:
+                    print("Таймер обнаружил завершение загрузки")
+                    check_timer.stop()
+                    # Финализируем сплеш скрин
+                    splash.finish(window)
+            except Exception as e:
+                print(f"Ошибка при проверке загрузки: {str(e)}")
+                check_timer.stop()
+                window.show()
+                window.activateWindow()
+        
+        # Запускаем таймер проверки завершения загрузки
+        check_timer.timeout.connect(check_loading)
+        check_timer.start(100)
+        
+        # Запускаем цикл обработки событий
+        sys.exit(app.exec())
+    except Exception as e:
+        print(f"Критическая ошибка при запуске приложения: {str(e)}")
+        if app:
+            sys.exit(app.exec())
