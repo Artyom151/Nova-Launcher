@@ -13,12 +13,14 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QStackedWidget, QFileDialog, QScrollArea, QListWidget, QDialog,
                              QFormLayout, QTabWidget, QCheckBox, QSystemTrayIcon, QMenu,
                              QListWidgetItem, QGroupBox, QSpinBox, QSizePolicy, QButtonGroup,
-                             QErrorMessage, QSplashScreen, QGraphicsDropShadowEffect)
-from PySide6.QtGui import QFont, QFontDatabase, QIcon, QPixmap, QPalette, QBrush, QAction, QColor
+                             QErrorMessage, QSplashScreen, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
+                             QGraphicsBlurEffect)
+from PySide6.QtGui import QFont, QFontDatabase, QIcon, QPixmap, QPalette, QBrush, QAction, QColor, QPainter, QRadialGradient
 from PySide6.QtCore import (Qt, QThread, Signal, QTimer, QPoint, QPropertyAnimation, 
                            QEasingCurve, QParallelAnimationGroup, QAbstractAnimation)
 from splash_screen import LoadingSplash
 import time
+import random
 
 class SidebarButton(QPushButton):
     def __init__(self, text, parent=None):
@@ -304,14 +306,38 @@ class VersionInfoWidget(QWidget):
         
         self.setVisible(True)
 
+class BackgroundWidget(QWidget):
+    def __init__(self, image_path, parent=None):
+        super().__init__(parent)
+        self.image_path = image_path
+        self.background = QPixmap(image_path)
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        
+        # Растягиваем изображение на весь виджет
+        scaled_background = self.background.scaled(
+            self.size(),
+            Qt.IgnoreAspectRatio,
+            Qt.SmoothTransformation
+        )
+        painter.drawPixmap(self.rect(), scaled_background)
+        
+        # Добавляем эффект Ember
+        gradient = QRadialGradient(
+            self.width() / 2, self.height() / 2,
+            max(self.width(), self.height())
+        )
+        gradient.setColorAt(0, QColor(255, 69, 0, 25))
+        gradient.setColorAt(0.5, QColor(255, 140, 0, 15))
+        gradient.setColorAt(1, QColor(139, 0, 0, 5))
+        
+        painter.fillRect(self.rect(), gradient)
+
 class MinecraftLauncher(QMainWindow):
     def __init__(self):
         super().__init__()
-        # Устанавливаем версию лаунчера
-        self.launcher_version = "1.6"
-        
-        # Устанавливаем флаги окна для корректного отображения кнопок управления
-        self.setWindowFlags(Qt.Window)
         
         # Изменяем пути файлов для использования кастомной директории
         self.nova_directory = os.path.join(os.path.expanduser("~"), ".nova_launcher")
@@ -323,40 +349,95 @@ class MinecraftLauncher(QMainWindow):
         if not os.path.exists(self.nova_directory):
             os.makedirs(self.nova_directory)
             
+        # Устанавливаем версию лаунчера
+        self.launcher_version = "1.7"
+        
         # Загружаем настройки в самом начале
         self.settings = self.load_settings()
         if "experimental_features" not in self.settings:
             self.settings["experimental_features"] = False
             self.save_settings()
-            
-        # Инициализируем кэш версий
+        
+        # Новая система кэширования
+        self.cache_manager = CacheManager(self)
+        
+        # Устанавливаем флаги окна для корректного отображения кнопок управления
+        self.setWindowFlags(Qt.Window)
+        
+        # Инициализируем улучшенный кэш версий
         self.version_cache = VersionCache(os.path.join(self.nova_directory, "version_cache.json"))
             
         # Настройка окна и базового стиля
         self.setWindowTitle("Nova Launcher")
         self.setMinimumSize(1200, 700)
         
-        # Set window icon
+        # Set window icon with improved quality
         self.icon = QIcon(os.path.join("Resources", "rounded_logo_nova.png"))
         self.setWindowIcon(self.icon)
         
-        # Установка фона в самом начале
-        self.background_path = os.path.join("Resources", "minecraft_launcher.png")
-        self.setup_permanent_background()
+        # Создаем и устанавливаем центральный виджет
+        central_widget = QWidget()
+        central_widget.setObjectName("centralWidget")
+        self.setCentralWidget(central_widget)
         
-        # Load Minecraft font
+        # Создаем главный layout
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Создаем фоновый виджет
+        self.background_path = os.path.join("Resources", "minecraft_launcher.png")
+        self.background_widget = BackgroundWidget(self.background_path)
+        
+        # Создаем контейнер для контента
+        content_widget = QWidget()
+        content_widget.setObjectName("contentWidget")
+        content_layout = QHBoxLayout(content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        
+        # Добавляем виджеты в layout
+        main_layout.addWidget(self.background_widget)
+        main_layout.addWidget(content_widget)
+        
+        # Устанавливаем z-order
+        self.background_widget.lower()
+        content_widget.raise_()
+        
+        # Устанавливаем стили
+        self.setStyleSheet("""
+            QMainWindow {
+                background: transparent;
+            }
+            QWidget#centralWidget {
+                background: transparent;
+            }
+            QWidget#contentWidget {
+                background: transparent;
+            }
+        """)
+        
+        # Load Minecraft font with improved rendering
         font_path = os.path.join("Resources", "minecraft-ten-font-cyrillic.ttf")
         font_id = QFontDatabase.addApplicationFont(font_path)
         if font_id != -1:
             font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
             self.minecraft_font = QFont(font_family, self.settings.get("font_size", 10))
+            self.minecraft_font.setHintingPreference(QFont.PreferFullHinting)
         else:
             self.minecraft_font = QFont("Arial", self.settings.get("font_size", 10))
 
-        # Инициализируем profile_combo перед загрузкой профилей
-        self.profile_combo = QComboBox()
+        # Инициализируем улучшенную систему уведомлений
+        self.notification_manager = NotificationManager(self)
+        
+        # Загружаем профили до создания комбобокса
+        self.load_profiles()
+        
+        # Инициализируем profile_combo
+        self.profile_combo = EnhancedComboBox()
         self.profile_combo.setFont(self.minecraft_font)
         self.profile_combo.currentIndexChanged.connect(self.profile_changed)
+        self.update_profile_combo()  # Обновляем список профилей в комбобоксе
 
         # Инициализируем profiles_list и settings_profiles_list
         self.profiles_list = QListWidget()
@@ -375,10 +456,6 @@ class MinecraftLauncher(QMainWindow):
         for label in [self.profile_name_label, self.profile_username_label, 
                      self.profile_version_label, self.profile_last_played_label]:
             label.setFont(self.minecraft_font)
-
-        # Load profiles
-        self.load_profiles()
-        self.update_profile_combo()
 
         # Create main widget and layout
         main_widget = QWidget()
@@ -416,6 +493,7 @@ class MinecraftLauncher(QMainWindow):
         self.news_page = self.create_news_page()
         self.settings_page = self.create_settings_page()
         self.social_page = self.create_social_page()
+        self.resources_page = self.create_resources_page()
         
         # Create sidebar buttons and add stretch
         self.sidebar_buttons = []
@@ -424,6 +502,16 @@ class MinecraftLauncher(QMainWindow):
         # Create profile selector container at bottom
         profile_container = QWidget()
         profile_container.setObjectName("profileContainer")
+        profile_container.setStyleSheet("""
+            #profileContainer {
+                background: rgba(35, 35, 35, 0.95);
+                border-top: 1px solid rgba(255, 140, 0, 0.2);
+                padding: 10px;
+                border-bottom-left-radius: 20px;
+                border-bottom-right-radius: 20px;
+            }
+        """)
+        
         profile_layout = QVBoxLayout(profile_container)
         profile_layout.setContentsMargins(15, 10, 15, 10)
         profile_layout.setSpacing(5)
@@ -438,9 +526,28 @@ class MinecraftLauncher(QMainWindow):
 
         add_profile_button = QPushButton("+")
         add_profile_button.setFont(self.minecraft_font)
-        add_profile_button.setFixedSize(30, 30)
+        add_profile_button.setFixedSize(35, 35)
         add_profile_button.clicked.connect(self.add_profile)
         add_profile_button.setObjectName("addProfileButton")
+        add_profile_button.setStyleSheet("""
+            #addProfileButton {
+                background: rgba(255, 140, 0, 0.2);
+                border: 1px solid rgba(255, 140, 0, 0.3);
+                border-radius: 8px;
+                color: white;
+                font-size: 18px;
+                font-weight: bold;
+            }
+            
+            #addProfileButton:hover {
+                background: rgba(255, 140, 0, 0.3);
+                border: 1px solid rgba(255, 140, 0, 0.5);
+            }
+            
+            #addProfileButton:pressed {
+                background: rgba(255, 140, 0, 0.4);
+            }
+        """)
 
         profile_selector_layout.addWidget(add_profile_button)
 
@@ -451,6 +558,14 @@ class MinecraftLauncher(QMainWindow):
         version_label.setFont(self.minecraft_font)
         version_label.setAlignment(Qt.AlignCenter)
         version_label.setObjectName("versionLabel")
+        version_label.setStyleSheet("""
+            #versionLabel {
+                color: rgba(255, 255, 255, 0.5);
+                padding: 10px;
+                font-size: 13px;
+                letter-spacing: 1px;
+            }
+        """)
         profile_layout.addWidget(version_label)
 
         # Add profile container to sidebar
@@ -472,19 +587,48 @@ class MinecraftLauncher(QMainWindow):
         # Запускаем проверку обновлений
         self.check_for_updates()
 
-    def setup_permanent_background(self):
-        """Устанавливает постоянный фон, который не исчезнет при обновлении интерфейса"""
+    def setup_ember_background(self):
+        """Устанавливает улучшенный фон с эффектом Ember"""
         if not os.path.exists(self.background_path):
             return
             
-        # Устанавливаем фон через styleSheet для центрального виджета
+        # Создаем улучшенный эффект свечения
+        self.ember_effect = EmberEffect(self)
+        
+        # Устанавливаем фон через styleSheet с эффектом Ember
         self.setStyleSheet(f"""
             QMainWindow {{
                 background-image: url("{self.background_path.replace('\\', '/')}");
                 background-position: center;
                 background-repeat: no-repeat;
-                background-attachment: fixed;
+                background-size: cover;
                 background-color: #2C2C2C;
+            }}
+            
+            /* Ember effect overlay */
+            QMainWindow::after {{
+                content: "";
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: radial-gradient(circle at center,
+                    rgba(255, 69, 0, 0.1) 0%,
+                    rgba(255, 140, 0, 0.05) 45%,
+                    rgba(139, 0, 0, 0.02) 100%
+                );
+                animation: ember-pulse 3s infinite;
+            }}
+            
+            @keyframes ember-pulse {{
+                0% {{ opacity: 0.5; }}
+                50% {{ opacity: 0.8; }}
+                100% {{ opacity: 0.5; }}
+            }}
+
+            QWidget#centralWidget {{
+                background: transparent;
             }}
         """)
         
@@ -1136,15 +1280,6 @@ class MinecraftLauncher(QMainWindow):
         profile_info.setObjectName("profileInfo")
         self.profile_info_label = profile_info
         layout.addWidget(profile_info)
-        
-        # Add profile management button
-        profile_buttons_layout = QHBoxLayout()
-        manage_profiles_button = QPushButton("Управление профилями")
-        manage_profiles_button.setFont(self.minecraft_font)
-        manage_profiles_button.clicked.connect(self.open_profile_manager)
-        profile_buttons_layout.addWidget(manage_profiles_button)
-        profile_buttons_layout.addStretch()
-        layout.addLayout(profile_buttons_layout)
         
         layout.addStretch()
         
@@ -2986,6 +3121,7 @@ class MinecraftLauncher(QMainWindow):
             ("ИГРАТЬ", self.play_page),
             ("ПРОФИЛИ", self.create_profiles_page()),  # Добавляем новую страницу профилей
             ("СКИНЫ", self.skins_page),
+            ("РЕСУРСЫ", self.create_resources_page()),  # Добавляем новую страницу
             ("НОВОСТИ", self.news_page),
             ("НАСТРОЙКИ", self.settings_page),
             ("СООБЩЕСТВО", self.social_page)
@@ -2993,7 +3129,7 @@ class MinecraftLauncher(QMainWindow):
         
         # Добавляем вкладку модов только если включены экспериментальные функции
         if self.settings.get("experimental_features", False):
-            pages.insert(3, ("МОДЫ", self.mods_page))
+            pages.insert(4, ("МОДЫ", self.mods_page))
 
         # Очищаем существующие кнопки
         self.sidebar_buttons.clear()
@@ -3022,6 +3158,38 @@ class MinecraftLauncher(QMainWindow):
         if self.sidebar_buttons:
             self.sidebar_buttons[0].setChecked(True)
             self.content_stack.setCurrentIndex(0)
+
+        # Обновляем стиль кнопок сайдбара
+        for button in self.sidebar_buttons:
+            button.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    border: none;
+                    color: rgba(255, 255, 255, 0.7);
+                    text-align: left;
+                    padding: 15px 35px;
+                    font-size: 16px;
+                    border-radius: 12px;
+                    margin: 3px 20px;
+                }
+
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(255, 140, 0, 0.1),
+                        stop:0.5 rgba(255, 140, 0, 0.2),
+                        stop:1 rgba(255, 140, 0, 0.1));
+                    color: white;
+                }
+
+                QPushButton:checked {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 rgba(255, 140, 0, 0.2),
+                        stop:0.5 rgba(255, 140, 0, 0.3),
+                        stop:1 rgba(255, 140, 0, 0.2));
+                    color: rgb(255, 140, 0);
+                    font-weight: bold;
+                }
+            """)
 
     def update_profiles_list(self):
         """Обновляет список профилей в окне управления профилями"""
@@ -4078,6 +4246,182 @@ class MinecraftLauncher(QMainWindow):
                 f"Не удалось запустить Minecraft: {str(e)}"
             )
 
+    def create_resources_page(self):
+        """Создает страницу с полезными ресурсами"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(40, 40, 40, 40)
+        
+        # Заголовок
+        title_label = QLabel("Полезные ресурсы")
+        title_label.setFont(QFont(self.minecraft_font.family(), 24))
+        title_label.setStyleSheet("""
+            color: white;
+            padding: 10px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #FF4500,
+                stop:0.5 #FF8C00,
+                stop:1 #FF4500
+            );
+            border-radius: 10px;
+        """)
+        layout.addWidget(title_label)
+        layout.addSpacing(20)
+
+        # Создаем вкладки для разных категорий
+        tabs = QTabWidget()
+        tabs.setFont(self.minecraft_font)
+        
+        # Вкладка текстур и ресурспаков
+        textures_tab = QWidget()
+        textures_layout = QVBoxLayout(textures_tab)
+        
+        # Кнопки для текстур
+        texture_buttons = [
+            ("Официальные ресурспаки", "https://www.minecraft.net/en-us/marketplace"),
+            ("Faithful (HD текстуры)", "https://faithful.team/"),
+            ("OptiFine HD", "https://optifine.net/downloads"),
+            ("PlanetMinecraft текстуры", "https://www.planetminecraft.com/texture-packs/")
+        ]
+        
+        for text, url in texture_buttons:
+            btn = QPushButton(text)
+            btn.setFont(self.minecraft_font)
+            btn.clicked.connect(lambda checked, u=url: self.open_url(u))
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 140, 0, 0.1);
+                    border: 1px solid rgba(255, 140, 0, 0.3);
+                    border-radius: 8px;
+                    color: white;
+                    padding: 12px;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 140, 0, 0.2);
+                    border: 1px solid rgba(255, 140, 0, 0.5);
+                }
+            """)
+            textures_layout.addWidget(btn)
+        
+        textures_layout.addStretch()
+        tabs.addTab(textures_tab, "Текстуры")
+        
+        # Вкладка карт
+        maps_tab = QWidget()
+        maps_layout = QVBoxLayout(maps_tab)
+        
+        map_buttons = [
+            ("Официальные карты", "https://www.minecraft.net/en-us/marketplace"),
+            ("PlanetMinecraft карты", "https://www.planetminecraft.com/project/"),
+            ("Карты для выживания", "https://www.minecraftmaps.com/survival-maps"),
+            ("Приключенческие карты", "https://www.minecraftmaps.com/adventure-maps")
+        ]
+        
+        for text, url in map_buttons:
+            btn = QPushButton(text)
+            btn.setFont(self.minecraft_font)
+            btn.clicked.connect(lambda checked, u=url: self.open_url(u))
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 140, 0, 0.1);
+                    border: 1px solid rgba(255, 140, 0, 0.3);
+                    border-radius: 8px;
+                    color: white;
+                    padding: 12px;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 140, 0, 0.2);
+                    border: 1px solid rgba(255, 140, 0, 0.5);
+                }
+            """)
+            maps_layout.addWidget(btn)
+        
+        maps_layout.addStretch()
+        tabs.addTab(maps_tab, "Карты")
+        
+        # Вкладка инструментов
+        tools_tab = QWidget()
+        tools_layout = QVBoxLayout(tools_tab)
+        
+        tool_buttons = [
+            ("Minecraft Wiki", "https://minecraft.fandom.com/"),
+            ("Генератор командных блоков", "https://mcstacker.net/"),
+            ("Планировщик построек", "https://www.plotz.co.uk/"),
+            ("Калькулятор зачарований", "https://www.minecraft-enchantments.com/"),
+            ("Генератор структур", "https://www.minecraft-schematics.com/"),
+            ("NBT редактор", "https://irath96.github.io/webNBT/"),
+        ]
+        
+        for text, url in tool_buttons:
+            btn = QPushButton(text)
+            btn.setFont(self.minecraft_font)
+            btn.clicked.connect(lambda checked, u=url: self.open_url(u))
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 140, 0, 0.1);
+                    border: 1px solid rgba(255, 140, 0, 0.3);
+                    border-radius: 8px;
+                    color: white;
+                    padding: 12px;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 140, 0, 0.2);
+                    border: 1px solid rgba(255, 140, 0, 0.5);
+                }
+            """)
+            tools_layout.addWidget(btn)
+        
+        tools_layout.addStretch()
+        tabs.addTab(tools_tab, "Инструменты")
+        
+        # Вкладка сообщества
+        community_tab = QWidget()
+        community_layout = QVBoxLayout(community_tab)
+        
+        community_buttons = [
+            ("Minecraft Forum", "https://www.minecraftforum.net/"),
+            ("Reddit r/Minecraft", "https://www.reddit.com/r/Minecraft/"),
+            ("Planet Minecraft", "https://www.planetminecraft.com/"),
+            ("CurseForge", "https://www.curseforge.com/minecraft"),
+            ("Minecraft Discord", "https://discord.com/invite/minecraft")
+        ]
+        
+        for text, url in community_buttons:
+            btn = QPushButton(text)
+            btn.setFont(self.minecraft_font)
+            btn.clicked.connect(lambda checked, u=url: self.open_url(u))
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 140, 0, 0.1);
+                    border: 1px solid rgba(255, 140, 0, 0.3);
+                    border-radius: 8px;
+                    color: white;
+                    padding: 12px;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 140, 0, 0.2);
+                    border: 1px solid rgba(255, 140, 0, 0.5);
+                }
+            """)
+            community_layout.addWidget(btn)
+        
+        community_layout.addStretch()
+        tabs.addTab(community_tab, "Сообщество")
+        
+        # Добавляем вкладки на страницу
+        layout.addWidget(tabs)
+        
+        return page
+        
+    def open_url(self, url):
+        """Открывает URL в браузере по умолчанию"""
+        import webbrowser
+        webbrowser.open(url)
+
 class MinecraftNewsThread(QThread):
     news_loaded = Signal(list)
     error = Signal(str)
@@ -4816,29 +5160,61 @@ class ProfileManagerDialog(QDialog):
             del self.parent.profiles[index]
             self.parent.save_profiles()
             self.load_profiles()
+            # Обновляем комбобокс профилей
+            self.update_profile_combo()
+
+    def duplicate_profile(self):
+        """Создает копию выбранного профиля"""
+        current_item = self.profiles_list.currentItem()
+        if not current_item:
+            return
+            
+        profile = current_item.data(Qt.UserRole).copy()
+        profile["name"] = f"{profile['name']} (копия)"
+        
+        # Генерируем новый UUID для иконки, если она есть
+        if "icon" in profile and profile["icon"]:
+            old_icon = profile["icon"]
+            new_icon = f"icon_{uuid.uuid4()}{os.path.splitext(old_icon)[1]}"
+            old_path = os.path.join(self.parent.nova_directory, "profile_icons", old_icon)
+            new_path = os.path.join(self.parent.nova_directory, "profile_icons", new_icon)
+            
+            if os.path.exists(old_path):
+                import shutil
+                shutil.copy2(old_path, new_path)
+                profile["icon"] = new_icon
+        
+        self.parent.profiles.append(profile)
+        self.parent.save_profiles()
+        self.load_profiles()
+        # Выбираем новый профиль
+        self.profiles_list.setCurrentRow(len(self.parent.profiles) - 1)
+        # Обновляем комбобокс профилей
+        self.update_profile_combo()
 
 class SmoothStackedWidget(QStackedWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.m_direction = Qt.Horizontal
-        self.m_speed = 500  # Уменьшаем скорость для большей плавности
-        self.m_animationtype = QEasingCurve.OutExpo  # Меняем тип анимации
+        self.m_speed = 800  # Увеличиваем длительность для максимальной плавности
+        self.m_animationtype = QEasingCurve.OutQuint  # Используем более плавную кривую
         self.m_now = 0
         self.m_next = 0
         self.m_wrap = False
         self.m_pnow = QPoint(0, 0)
         self.m_active = False
+        self.animation_group = None
 
-        # Создаем слои для эффекта размытия движения
-        self.motion_layers = []
-        for i in range(5):  # Увеличиваем количество слоев
-            layer = QWidget(self)
-            layer.setStyleSheet(f"background-color: rgba(0, 0, 0, {0.08 * (i + 1)});")
-            layer.hide()
-            self.motion_layers.append(layer)
-            
-        # Храним группу анимаций как атрибут класса
-        self.anim_group = None
+        # Улучшенный эффект тени
+        self.shadow = QGraphicsDropShadowEffect(self)
+        self.shadow.setBlurRadius(30)
+        self.shadow.setColor(QColor(0, 0, 0, 100))
+        self.shadow.setOffset(0, 2)
+        self.setGraphicsEffect(self.shadow)
+
+        # Включаем сглаживание для более плавного рендеринга
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, False)
 
     def setSpeed(self, speed):
         """Устанавливает скорость анимации"""
@@ -4894,6 +5270,8 @@ class SmoothStackedWidget(QStackedWidget):
 
         offsetx = self.frameRect().width()
         offsety = self.frameRect().height()
+
+        # Подготавливаем виджеты
         self.widget(_next).setGeometry(self.frameRect())
 
         if not self.m_direction == Qt.Horizontal:
@@ -4915,68 +5293,121 @@ class SmoothStackedWidget(QStackedWidget):
         pnow = self.widget(_now).pos()
         self.m_pnow = pnow
 
-        offset = QPoint(offsetx, offsety)
-        self.widget(_next).move(pnext - offset)
+        # Создаем улучшенные эффекты
+        curr_opacity = QGraphicsOpacityEffect(self.widget(_now))
+        next_opacity = QGraphicsOpacityEffect(self.widget(_next))
+        curr_blur = QGraphicsBlurEffect(self.widget(_now))
+        next_blur = QGraphicsBlurEffect(self.widget(_next))
+        
+        # Настраиваем начальные значения эффектов
+        curr_opacity.setOpacity(1.0)
+        next_opacity.setOpacity(0.0)
+        curr_blur.setBlurRadius(0)
+        next_blur.setBlurRadius(10)
+        
+        self.widget(_now).setGraphicsEffect(curr_opacity)
+        self.widget(_next).setGraphicsEffect(next_opacity)
+
+        # Устанавливаем начальное положение
+        self.widget(_next).move(pnext - QPoint(offsetx * 0.8, 0))  # Уменьшаем начальное смещение
         self.widget(_next).show()
         self.widget(_next).raise_()
 
-        # Настраиваем слои для улучшенного эффекта размытия
-        for i, layer in enumerate(self.motion_layers):
-            layer.setGeometry(self.rect())
-            layer.show()
-            layer.raise_()
-            
-            # Улучшенное смещение слоев
-            offset_factor = 0.15 * (i + 1)  # Уменьшаем смещение для большей плавности
-            layer_offset = QPoint(int(offsetx * offset_factor), int(offsety * offset_factor))
-            layer.move(pnow + layer_offset)
+        # Создаем группу анимаций
+        self.animation_group = QParallelAnimationGroup(self)
 
-        # Очищаем предыдущую группу анимаций
-        if self.anim_group is not None:
-            self.anim_group.stop()
-            self.anim_group.deleteLater()
+        # Анимация текущего виджета (более плавное исчезновение)
+        anim_now = QPropertyAnimation(self.widget(_now), b"pos")
+        anim_now.setDuration(self.m_speed)
+        anim_now.setStartValue(pnow)
+        anim_now.setEndValue(pnow + QPoint(offsetx * 0.2, 0))  # Минимальное смещение
+        anim_now.setEasingCurve(QEasingCurve.OutQuint)
+        self.animation_group.addAnimation(anim_now)
 
-        # Создаем новую группу анимаций
-        self.anim_group = QParallelAnimationGroup(self)
+        # Улучшенная анимация прозрачности текущего виджета
+        fade_out = QPropertyAnimation(curr_opacity, b"opacity")
+        fade_out.setDuration(self.m_speed * 0.7)  # Быстрее исчезает
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QEasingCurve.InQuint)
+        self.animation_group.addAnimation(fade_out)
 
-        # Анимации для основных виджетов с улучшенными параметрами
-        for index, start, end in zip((_now, _next), (pnow, pnext - offset), (pnow + offset, pnext)):
-            animation = QPropertyAnimation(self.widget(index), b"pos", self)
-            animation.setDuration(self.m_speed)
-            animation.setEasingCurve(self.m_animationtype)
-            animation.setStartValue(start)
-            animation.setEndValue(end)
-            self.anim_group.addAnimation(animation)
+        # Анимация нового виджета (более плавное появление)
+        anim_next = QPropertyAnimation(self.widget(_next), b"pos")
+        anim_next.setDuration(self.m_speed)
+        anim_next.setStartValue(pnext - QPoint(offsetx * 0.8, 0))
+        anim_next.setEndValue(pnext)
+        anim_next.setEasingCurve(QEasingCurve.OutQuint)
+        self.animation_group.addAnimation(anim_next)
 
-        # Улучшенные анимации для слоев размытия
-        for i, layer in enumerate(self.motion_layers):
-            delay_factor = 0.12 * (i + 1)  # Уменьшаем задержку
-            layer_anim = QPropertyAnimation(layer, b"pos", self)
-            layer_anim.setStartValue(pnow)
-            layer_anim.setEndValue(pnow + offset)
-            layer_anim.setDuration(int(self.m_speed * (1 + delay_factor)))
-            layer_anim.setEasingCurve(QEasingCurve.OutExpo)  # Используем OutExpo для слоев
-            self.anim_group.addAnimation(layer_anim)
+        # Улучшенная анимация прозрачности нового виджета
+        fade_in = QPropertyAnimation(next_opacity, b"opacity")
+        fade_in.setDuration(self.m_speed)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.OutQuint)
+        self.animation_group.addAnimation(fade_in)
 
-        self.anim_group.finished.connect(self.animationDoneSlot)
+        # Улучшенная анимация масштабирования
+        scale_rect = self.widget(_next).geometry()
+        scale_rect.adjust(scale_rect.width() * 0.02, scale_rect.height() * 0.02, 
+                         -scale_rect.width() * 0.02, -scale_rect.height() * 0.02)
+        
+        scale = QPropertyAnimation(self.widget(_next), b"geometry")
+        scale.setDuration(self.m_speed)
+        scale.setStartValue(scale_rect)
+        scale.setEndValue(self.widget(_next).geometry())
+        scale.setEasingCurve(QEasingCurve.OutQuint)
+        self.animation_group.addAnimation(scale)
+
+        # Анимация тени с задержкой
+        shadow_anim = QPropertyAnimation(self.shadow, b"blurRadius")
+        shadow_anim.setDuration(self.m_speed * 0.8)
+        shadow_anim.setStartValue(30)
+        shadow_anim.setEndValue(20)
+        shadow_anim.setEasingCurve(QEasingCurve.InOutQuint)
+        self.animation_group.addAnimation(shadow_anim)
+
+        # Подключаем сигнал завершения
+        self.animation_group.finished.connect(self.animationDoneSlot)
         self.m_next = _next
         self.m_now = _now
-        self.m_active = True
-        self.anim_group.start()
+        self.animation_group.start()
 
     def animationDoneSlot(self):
-        # Скрываем слои размытия
-        for layer in self.motion_layers:
-            layer.hide()
-            
+        # Устанавливаем текущий индекс
         self.setCurrentIndex(self.m_next)
-        self.widget(self.m_now).hide()
-        self.m_active = False
         
-        # Очищаем группу анимаций
-        if self.anim_group is not None:
-            self.anim_group.deleteLater()
-            self.anim_group = None
+        # Плавно скрываем предыдущий виджет
+        hide_anim = QPropertyAnimation(self.widget(self.m_now), b"opacity", self)
+        hide_anim.setDuration(200)
+        hide_anim.setStartValue(1.0)
+        hide_anim.setEndValue(0.0)
+        hide_anim.setEasingCurve(QEasingCurve.OutQuint)
+        hide_anim.finished.connect(lambda: self.widget(self.m_now).hide())
+        hide_anim.start()
+        
+        # Возвращаем виджет в исходное положение
+        self.widget(self.m_now).move(self.m_pnow)
+        
+        # Удаляем эффекты
+        self.widget(self.m_now).setGraphicsEffect(None)
+        self.widget(self.m_next).setGraphicsEffect(None)
+        
+        # Плавно восстанавливаем тень
+        shadow_anim = QPropertyAnimation(self.shadow, b"blurRadius")
+        shadow_anim.setDuration(400)
+        shadow_anim.setStartValue(20)
+        shadow_anim.setEndValue(30)
+        shadow_anim.setEasingCurve(QEasingCurve.OutQuint)
+        shadow_anim.start()
+        
+        # Очищаем анимацию
+        if self.animation_group is not None:
+            self.animation_group.deleteLater()
+            self.animation_group = None
+            
+        self.m_active = False
 
 class BeautifulProgressBar(QProgressBar):
     def __init__(self, parent=None):
@@ -5108,6 +5539,351 @@ class BeautifulProgressBar(QProgressBar):
         # Прогресс-бар
         self.progress_bar = BeautifulProgressBar()
         self.progress_bar.setVisible(False)
+
+class CacheManager:
+    """Улучшенная система кэширования для Nova Launcher"""
+    def __init__(self, parent):
+        self.parent = parent
+        self.cache_dir = os.path.join(parent.nova_directory, "cache")
+        self.ensure_cache_dir()
+        self.cache = {}
+        self.load_cache()
+        
+    def ensure_cache_dir(self):
+        """Создает директорию кэша если она не существует"""
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+            
+    def load_cache(self):
+        """Загружает кэш из файла"""
+        cache_file = os.path.join(self.cache_dir, "launcher_cache.json")
+        try:
+            if os.path.exists(cache_file):
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    self.cache = json.load(f)
+        except Exception as e:
+            print(f"Ошибка загрузки кэша: {e}")
+            self.cache = {}
+            
+    def save_cache(self):
+        """Сохраняет кэш в файл"""
+        cache_file = os.path.join(self.cache_dir, "launcher_cache.json")
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cache, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"Ошибка сохранения кэша: {e}")
+            
+    def get(self, key, default=None):
+        """Получает значение из кэша"""
+        return self.cache.get(key, default)
+        
+    def set(self, key, value):
+        """Устанавливает значение в кэш"""
+        self.cache[key] = value
+        self.save_cache()
+        
+    def clear(self):
+        """Очищает кэш"""
+        self.cache = {}
+        self.save_cache()
+
+class EmberEffect(QWidget):
+    """Создает эффект тлеющих углей для интерфейса"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.particles = []
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_particles)
+        self.timer.start(50)
+        
+    def update_particles(self):
+        """Обновляет частицы эффекта"""
+        # Добавляем новые частицы
+        if len(self.particles) < 50:
+            self.particles.append({
+                'x': random.randint(0, self.width()),
+                'y': random.randint(0, self.height()),
+                'size': random.randint(2, 8),
+                'opacity': random.random(),
+                'speed': random.random() * 2
+            })
+            
+        # Обновляем существующие частицы
+        for particle in self.particles[:]:
+            particle['y'] -= particle['speed']
+            particle['opacity'] -= 0.01
+            if particle['opacity'] <= 0:
+                self.particles.remove(particle)
+                
+        self.update()
+        
+    def paintEvent(self, event):
+        """Отрисовывает эффект"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        for particle in self.particles:
+            color = QColor(255, 69, 0, int(particle['opacity'] * 255))
+            painter.setBrush(QBrush(color))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(
+                int(particle['x']),
+                int(particle['y']),
+                particle['size'],
+                particle['size']
+            )
+
+class NotificationManager:
+    """Улучшенная система уведомлений"""
+    def __init__(self, parent):
+        self.parent = parent
+        self.notifications = []
+        self.animation_group = None
+        
+    def show_notification(self, title, message, type="info", duration=3000):
+        """Показывает красивое уведомление"""
+        notification = NotificationWidget(self.parent, title, message, type)
+        self.notifications.append(notification)
+        
+        # Позиционируем уведомление
+        self.position_notification(notification)
+        
+        # Анимация появления
+        self.animate_notification(notification)
+        
+        # Автоматическое скрытие
+        QTimer.singleShot(duration, lambda: self.hide_notification(notification))
+        
+    def position_notification(self, notification):
+        """Позиционирует уведомление на экране"""
+        parent_rect = self.parent.geometry()
+        notification_x = parent_rect.right() - notification.width() - 20
+        notification_y = parent_rect.top() + 20
+        
+        # Смещаем существующие уведомления вниз
+        for existing in self.notifications[:-1]:
+            if existing.isVisible():
+                existing.move(existing.x(), existing.y() + notification.height() + 10)
+                
+        notification.move(notification_x, notification_y)
+        
+    def animate_notification(self, notification):
+        """Создает анимацию появления уведомления"""
+        notification.show()
+        
+        # Анимация прозрачности
+        opacity_effect = QGraphicsOpacityEffect(notification)
+        notification.setGraphicsEffect(opacity_effect)
+        
+        fade_in = QPropertyAnimation(opacity_effect, b"opacity")
+        fade_in.setDuration(250)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.OutCubic)
+        
+        # Анимация позиции
+        pos_anim = QPropertyAnimation(notification, b"pos")
+        pos_anim.setDuration(250)
+        start_pos = notification.pos() + QPoint(100, 0)
+        pos_anim.setStartValue(start_pos)
+        pos_anim.setEndValue(notification.pos())
+        pos_anim.setEasingCurve(QEasingCurve.OutCubic)
+        
+        # Запускаем анимации параллельно
+        self.animation_group = QParallelAnimationGroup()
+        self.animation_group.addAnimation(fade_in)
+        self.animation_group.addAnimation(pos_anim)
+        self.animation_group.start()
+        
+    def hide_notification(self, notification):
+        """Скрывает уведомление с анимацией"""
+        if notification in self.notifications:
+            # Анимация исчезновения
+            opacity_effect = notification.graphicsEffect()
+            
+            fade_out = QPropertyAnimation(opacity_effect, b"opacity")
+            fade_out.setDuration(250)
+            fade_out.setStartValue(1.0)
+            fade_out.setEndValue(0.0)
+            fade_out.setEasingCurve(QEasingCurve.InCubic)
+            
+            pos_anim = QPropertyAnimation(notification, b"pos")
+            pos_anim.setDuration(250)
+            start_pos = notification.pos()
+            end_pos = start_pos + QPoint(100, 0)
+            pos_anim.setStartValue(start_pos)
+            pos_anim.setEndValue(end_pos)
+            pos_anim.setEasingCurve(QEasingCurve.InCubic)
+            
+            # Группа анимаций
+            anim_group = QParallelAnimationGroup()
+            anim_group.addAnimation(fade_out)
+            anim_group.addAnimation(pos_anim)
+            
+            # После завершения анимации удаляем уведомление
+            anim_group.finished.connect(lambda: self.remove_notification(notification))
+            anim_group.start()
+            
+    def remove_notification(self, notification):
+        """Удаляет уведомление из списка"""
+        if notification in self.notifications:
+            self.notifications.remove(notification)
+            notification.deleteLater()
+
+class NotificationWidget(QWidget):
+    """Виджет уведомления с улучшенным дизайном"""
+    def __init__(self, parent, title, message, type="info"):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # Настройка внешнего вида
+        self.setFixedWidth(300)
+        self.setStyleSheet("""
+            QWidget {
+                background-color: rgba(45, 45, 45, 0.95);
+                border-radius: 10px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+        """)
+        
+        # Создаем layout
+        layout = QVBoxLayout(self)
+        
+        # Заголовок
+        title_label = QLabel(title)
+        title_label.setStyleSheet("""
+            color: white;
+            font-weight: bold;
+            font-size: 14px;
+        """)
+        
+        # Сообщение
+        message_label = QLabel(message)
+        message_label.setWordWrap(True)
+        message_label.setStyleSheet("""
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 12px;
+        """)
+        
+        # Добавляем иконку в зависимости от типа
+        icon_label = QLabel()
+        icon_path = {
+            "info": "info_icon.png",
+            "success": "success_icon.png",
+            "warning": "warning_icon.png",
+            "error": "error_icon.png"
+        }.get(type, "info_icon.png")
+        
+        icon_path = os.path.join("Resources", icon_path)
+        if os.path.exists(icon_path):
+            pixmap = QPixmap(icon_path)
+            icon_label.setPixmap(pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        
+        # Создаем горизонтальный layout для заголовка с иконкой
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(icon_label)
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        # Добавляем все элементы в основной layout
+        layout.addLayout(header_layout)
+        layout.addWidget(message_label)
+        
+        # Добавляем эффект тени
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        shadow.setOffset(0, 0)
+        self.setGraphicsEffect(shadow)
+
+class EnhancedComboBox(QComboBox):
+    """Улучшенный комбобокс с анимациями и эффектами"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("""
+            QComboBox {
+                background: rgba(45, 45, 45, 0.95);
+                border: 1px solid rgba(255, 140, 0, 0.3);
+                border-radius: 8px;
+                padding: 8px 15px;
+                color: white;
+                min-width: 180px;
+                font-size: 13px;
+            }
+            
+            QComboBox:hover {
+                background: rgba(255, 140, 0, 0.1);
+                border: 1px solid rgba(255, 140, 0, 0.5);
+            }
+            
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            
+            QComboBox::down-arrow {
+                image: url(Resources/down_arrow.png);
+                width: 12px;
+                height: 12px;
+            }
+            
+            QComboBox QAbstractItemView {
+                background: rgba(35, 35, 35, 0.98);
+                border: 1px solid rgba(255, 140, 0, 0.3);
+                selection-background-color: rgba(255, 140, 0, 0.2);
+                selection-color: white;
+                border-radius: 8px;
+                padding: 5px;
+            }
+        """)
+        
+        # Добавляем эффект свечения
+        glow = QGraphicsDropShadowEffect(self)
+        glow.setBlurRadius(15)
+        glow.setColor(QColor(255, 140, 0, 100))
+        glow.setOffset(0, 0)
+        self.setGraphicsEffect(glow)
+        
+        # Инициализируем переменные для отслеживания состояния
+        self._popup_visible = False
+        self._animation = None
+        
+    def showPopup(self):
+        """Показывает выпадающий список с анимацией"""
+        if not self._popup_visible:
+            super().showPopup()
+            if self.view():
+                # Создаем и настраиваем эффект прозрачности
+                opacity_effect = QGraphicsOpacityEffect(self.view())
+                self.view().setGraphicsEffect(opacity_effect)
+                
+                # Создаем анимацию
+                self._animation = QPropertyAnimation(opacity_effect, b"opacity")
+                self._animation.setDuration(150)
+                self._animation.setStartValue(0.0)
+                self._animation.setEndValue(1.0)
+                self._animation.setEasingCurve(QEasingCurve.OutCubic)
+                self._animation.finished.connect(self._on_animation_finished)
+                self._animation.start()
+                
+                self._popup_visible = True
+    
+    def hidePopup(self):
+        """Скрывает выпадающий список"""
+        if self._popup_visible:
+            if self._animation and self._animation.state() == QPropertyAnimation.Running:
+                self._animation.stop()
+            super().hidePopup()
+            self._popup_visible = False
+    
+    def _on_animation_finished(self):
+        """Обработчик завершения анимации"""
+        if self._animation:
+            self._animation.deleteLater()
+            self._animation = None
 
 if __name__ == "__main__":
     app = None
