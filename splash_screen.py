@@ -1,126 +1,67 @@
 import sys
 import os
-from PySide6.QtWidgets import QSplashScreen, QProgressBar, QLabel, QVBoxLayout, QWidget
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QSize, QRect, QParallelAnimationGroup
-from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QLinearGradient, QPainterPath, QRegion, QRadialGradient
+from PySide6.QtWidgets import (QSplashScreen, QProgressBar, QLabel, QVBoxLayout, 
+                             QWidget, QGraphicsDropShadowEffect, QGraphicsOpacityEffect)
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QSequentialAnimationGroup, QPoint
+from PySide6.QtGui import QPixmap, QPainter, QColor, QFont, QLinearGradient, QRadialGradient, QFontDatabase
 import time
 from PySide6.QtWidgets import QApplication
+import math
 
-VERSION = "1.5"
-CODENAME = "Angel Falling"
+VERSION = "1.6"
+CODENAME = "Arcade Down"
 
-class SimpleProgressBar(QProgressBar):
+class ModernProgressBar(QProgressBar):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(4)
+        self.setFixedHeight(2)
         self.setTextVisible(False)
-        self.setValue(0)
+        self.setMaximumWidth(300)
         
-        # Улучшенный стиль прогресс-бара с более плавным градиентом
+        # Улучшенный стиль прогресс-бара
         self.setStyleSheet("""
             QProgressBar {
                 border: none;
-                background: rgba(255, 255, 255, 0.08);
-                border-radius: 2px;
+                background: rgba(255, 255, 255, 0.1);
             }
             QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #FFD700, 
-                    stop:0.3 #FFC0CB,
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #FF1493,
+                    stop:0.3 #FFD700,
                     stop:0.6 #FF69B4,
-                    stop:0.8 #FF1493,
-                    stop:1 #FF00FF);
-                border-radius: 2px;
+                    stop:1 #FFD700
+                );
             }
         """)
         
-        # Создаем анимацию для плавного увеличения значения
-        self.animation = QPropertyAnimation(self, b"value")
-        self.animation.setEasingCurve(QEasingCurve.OutCubic)
+        # Эффект свечения
+        glow = QGraphicsDropShadowEffect(self)
+        glow.setBlurRadius(10)
+        glow.setColor(QColor(255, 20, 147, 150))  # Розовое свечение
+        glow.setOffset(0, 0)
+        self.setGraphicsEffect(glow)
         
-        # Создаем эффект размытия для движения
-        self.trail_widgets = []
-        for i in range(3):
-            trail = QProgressBar(self)
-            trail.setFixedHeight(4)
-            trail.setTextVisible(False)
-            trail.setStyleSheet(f"""
-                QProgressBar {{
-                    border: none;
-                    background: transparent;
-                    border-radius: 2px;
-                }}
-                QProgressBar::chunk {{
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 rgba(255, 215, 0, {40 - i*10}),
-                        stop:0.3 rgba(255, 192, 203, {40 - i*10}),
-                        stop:0.6 rgba(255, 105, 180, {40 - i*10}),
-                        stop:0.8 rgba(255, 20, 147, {40 - i*10}),
-                        stop:1 rgba(255, 0, 255, {40 - i*10}));
-                    border-radius: 2px;
-                }}
-            """)
-            trail.hide()
-            self.trail_widgets.append(trail)
-            
-        # Анимации для следов
-        self.trail_animations = []
-        for trail in self.trail_widgets:
-            anim = QPropertyAnimation(trail, b"value")
-            anim.setEasingCurve(QEasingCurve.OutCubic)
-            self.trail_animations.append(anim)
-        
-    def setValueSmooth(self, value, duration=500):
-        """Плавно устанавливает значение прогресс-бара с эффектом размытия движения"""
-        current = self.value()
-        
-        # Показываем следы
-        for trail in self.trail_widgets:
-            trail.show()
-            trail.setValue(current)
-            trail.raise_()
-        
-        # Настраиваем анимацию основного прогресс-бара
-        self.animation.stop()
-        self.animation.setStartValue(current)
-        self.animation.setEndValue(value)
-        self.animation.setDuration(duration)
-        
-        # Настраиваем анимации следов с разными задержками
-        for i, (trail, trail_anim) in enumerate(zip(self.trail_widgets, self.trail_animations)):
-            delay_factor = 0.2 * (i + 1)  # Каждый след начинает двигаться с задержкой
-            trail_anim.stop()
-            trail_anim.setStartValue(current)
-            trail_anim.setEndValue(value)
-            trail_anim.setDuration(int(duration * (1 + delay_factor)))
-            
-            # Запускаем анимации
-            trail_anim.start()
-        
-        # Запускаем основную анимацию
-        self.animation.start()
-        
-        # Скрываем следы после завершения анимации
-        QTimer.singleShot(duration + 100, lambda: [trail.hide() for trail in self.trail_widgets])
+        # Анимация значения
+        self.value_animation = QPropertyAnimation(self, b"value")
+        self.value_animation.setEasingCurve(QEasingCurve.OutExpo)
+        self.value_animation.setDuration(800)
+    
+    def setValueSmooth(self, value):
+        self.value_animation.stop()
+        self.value_animation.setStartValue(self.value())
+        self.value_animation.setEndValue(value)
+        self.value_animation.start()
 
 class LoadingSplash(QSplashScreen):
     def __init__(self):
-        # Загружаем фоновое изображение для определения размеров
-        self.background = QPixmap("Resources/minecraft_launcher.png")
-        if self.background.isNull():
-            self.background = QPixmap(800, 450)
-            self.background.fill(Qt.transparent)
+        # Создаем пустой QPixmap
+        super().__init__(QPixmap(700, 475))
         
-        # Создаем пустой QPixmap нужного размера
-        super().__init__(QPixmap(self.background.size()))
-        
-        # Устанавливаем флаги окна
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        # Настройка окна
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WA_NoSystemBackground)
         
-        # Центрируем окно на экране
+        # Центрируем окно
         screen = QApplication.primaryScreen().geometry()
         self.move(
             screen.center().x() - self.width() // 2,
@@ -129,283 +70,206 @@ class LoadingSplash(QSplashScreen):
         
         # Основной контейнер
         self.content = QWidget(self)
-        self.content.setGeometry(0, 0, self.background.width(), self.background.height())
+        self.content.setGeometry(0, 0, self.width(), self.height())
         layout = QVBoxLayout(self.content)
         layout.setContentsMargins(40, 40, 40, 40)
-        layout.setSpacing(15)
+        layout.setSpacing(20)
+        
+        # Логотип
+        self.logo_label = QLabel()
+        logo_pixmap = QPixmap(os.path.join("Resources", "rounded_logo_nova.png"))
+        self.logo_label.setPixmap(logo_pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.logo_label.setAlignment(Qt.AlignCenter)
+        
+        # Загружаем красивый шрифт
+        font_id = QFontDatabase.addApplicationFont(os.path.join("Resources", "minecraft-ten-font-cyrillic.ttf"))
+        if font_id != -1:
+            font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+            title_font = QFont(font_family, 36)
+            version_font = QFont(font_family, 16)
+            status_font = QFont(font_family, 14)
+        else:
+            title_font = QFont("Segoe UI", 36, QFont.Bold)
+            version_font = QFont("Segoe UI", 16)
+            status_font = QFont("Segoe UI", 14)
         
         # Заголовок с улучшенным стилем
         self.title = QLabel("NOVA LAUNCHER")
+        self.title.setFont(title_font)
         self.title.setStyleSheet("""
-            QLabel {
-                color: white;
-                font-size: 32px;
-                font-weight: bold;
-                font-family: 'Segoe UI';
-                letter-spacing: 2px;
-                background-color: rgba(0, 0, 0, 0.3);
-                border-radius: 10px;
-                padding: 10px 20px;
-            }
+            color: white;
+            font-weight: bold;
+            letter-spacing: 4px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #FF1493,
+                stop:0.5 #FFD700,
+                stop:1 #FF1493
+            );
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            padding: 10px;
         """)
         self.title.setAlignment(Qt.AlignCenter)
         
-        # Версия и кодовое имя с улучшенным стилем
+        # Версия с улучшенным стилем
         self.version = QLabel(f"v{VERSION} '{CODENAME}'")
+        self.version.setFont(version_font)
         self.version.setStyleSheet("""
-            QLabel {
-                color: white;
-                font-size: 14px;
-                font-family: 'Segoe UI';
-                font-weight: 500;
-                letter-spacing: 1px;
-                background-color: rgba(67, 160, 71, 0.2);
-                border: 1px solid rgba(67, 160, 71, 0.3);
-                border-radius: 10px;
-                padding: 4px 12px;
-            }
+            color: #FFD700;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
         """)
         self.version.setAlignment(Qt.AlignCenter)
         
         # Статус с улучшенным стилем
         self.status = QLabel("Инициализация...")
+        self.status.setFont(status_font)
         self.status.setStyleSheet("""
-            QLabel {
-                color: white;
-                font-size: 16px;
-                font-family: 'Segoe UI';
-                font-weight: 500;
-                letter-spacing: 0.5px;
-                background-color: rgba(0, 0, 0, 0.3);
-                border-radius: 8px;
-                padding: 8px 16px;
-            }
+            color: rgba(255, 255, 255, 0.9);
+            letter-spacing: 1px;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px 20px;
+            border-radius: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
         """)
         self.status.setAlignment(Qt.AlignCenter)
         
-        # Прогресс-бар (используем простую версию)
-        self.progress = SimpleProgressBar()
-        self.progress.setMaximumWidth(400)
+        # Прогресс-бар
+        self.progress = ModernProgressBar()
         
         # Добавляем виджеты
-        layout.addStretch(2)
-        layout.addWidget(self.title)
+        layout.addStretch(1)
+        layout.addWidget(self.logo_label, 0, Qt.AlignCenter)
+        layout.addWidget(self.title, 0, Qt.AlignCenter)
         layout.addWidget(self.version, 0, Qt.AlignCenter)
-        layout.addSpacing(10)
-        layout.addWidget(self.status)
+        layout.addSpacing(30)
+        layout.addWidget(self.status, 0, Qt.AlignCenter)
         layout.addWidget(self.progress, 0, Qt.AlignCenter)
-        layout.addStretch(3)
+        layout.addStretch(1)
         
-        # Переменные для отслеживания прогресса
+        # Эффекты для виджетов
+        for widget in [self.logo_label, self.title, self.version, self.status]:
+            glow = QGraphicsDropShadowEffect(widget)
+            glow.setBlurRadius(20)
+            glow.setColor(QColor(0, 0, 0, 180))
+            glow.setOffset(0, 0)
+            widget.setGraphicsEffect(glow)
+        
+        # Анимация появления
+        self.fade_in_animation = QSequentialAnimationGroup(self)
+        
+        # Анимация для каждого виджета
+        widgets = [self.logo_label, self.title, self.version, self.status, self.progress]
+        for i, widget in enumerate(widgets):
+            opacity_effect = QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(opacity_effect)
+            opacity_effect.setOpacity(0.0)
+            
+            pause = QTimer()
+            pause.setInterval(i * 100)
+            pause.setSingleShot(True)
+            
+            anim = QPropertyAnimation(opacity_effect, b"opacity")
+            anim.setDuration(1000)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            
+            self.fade_in_animation.addAnimation(anim)
+            pause.timeout.connect(anim.start)
+            pause.start()
+        
         self.loading_finished = False
-        self.current_progress = 0
         
-        # Показываем окно сразу с полной прозрачностью
-        self.setWindowOpacity(1.0)
-        self.show()
-    
-    def drawContents(self, painter: QPainter):
-        # Включаем сглаживание
+    def drawBackground(self, painter):
+        """Рисует улучшенный фон с градиентом"""
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
         
-        # Рисуем фоновое изображение
-        if not self.background.isNull():
-            painter.drawPixmap(0, 0, self.background)
+        # Основной градиент
+        gradient = QLinearGradient(0, 0, self.width(), self.height())
+        gradient.setColorAt(0, QColor(20, 20, 30))
+        gradient.setColorAt(1, QColor(30, 30, 45))
+        painter.fillRect(self.rect(), gradient)
         
-        # Создаем темную виньетку
-        # Внешний градиент (темная рамка)
-        outer_gradient = QLinearGradient(0, 0, 0, self.height())
-        outer_gradient.setColorAt(0, QColor(0, 0, 0, 180))  # Темный верх
-        outer_gradient.setColorAt(0.4, QColor(0, 0, 0, 120))  # Более светлый центр
-        outer_gradient.setColorAt(0.6, QColor(0, 0, 0, 120))  # Более светлый центр
-        outer_gradient.setColorAt(1, QColor(0, 0, 0, 180))  # Темный низ
-        painter.fillRect(self.rect(), outer_gradient)
-        
-        # Боковая виньетка
-        left_gradient = QLinearGradient(0, 0, self.width() * 0.3, 0)
-        left_gradient.setColorAt(0, QColor(0, 0, 0, 180))
-        left_gradient.setColorAt(1, QColor(0, 0, 0, 0))
-        painter.fillRect(self.rect(), left_gradient)
-        
-        right_gradient = QLinearGradient(self.width(), 0, self.width() * 0.7, 0)
-        right_gradient.setColorAt(0, QColor(0, 0, 0, 180))
-        right_gradient.setColorAt(1, QColor(0, 0, 0, 0))
-        painter.fillRect(self.rect(), right_gradient)
-        
-        # Добавляем легкое свечение в центре
-        center_glow = QRadialGradient(
-            self.width() / 2, self.height() / 2,  # центр
-            min(self.width(), self.height()) / 2   # радиус
+        # Верхнее свечение
+        glow = QRadialGradient(
+            self.width() / 2, -50,
+            self.width() / 1.5
         )
-        center_glow.setColorAt(0, QColor(255, 255, 255, 10))  # Очень легкое свечение в центре
-        center_glow.setColorAt(0.5, QColor(255, 255, 255, 0))  # Постепенно исчезает
-        center_glow.setColorAt(1, QColor(0, 0, 0, 0))  # Полностью прозрачный край
-        painter.fillRect(self.rect(), center_glow)
+        glow.setColorAt(0, QColor(255, 20, 147, 30))  # Розовое свечение
+        glow.setColorAt(0.5, QColor(255, 215, 0, 20))  # Желтое свечение
+        glow.setColorAt(1, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), glow)
+        
+        # Дополнительное боковое свечение
+        side_glow = QRadialGradient(
+            self.width(), self.height() / 2,
+            self.width() / 2
+        )
+        side_glow.setColorAt(0, QColor(255, 215, 0, 20))
+        side_glow.setColorAt(1, QColor(0, 0, 0, 0))
+        painter.fillRect(self.rect(), side_glow)
     
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        self.drawBackground(painter)
+        
     def start_progress(self):
-        """Начинает процесс отображения прогресса загрузки"""
-        # Окно уже должно быть видимым, просто делаем его прозрачным
-        self.fadeIn()
-        
-        # Сбрасываем прогресс
-        self.current_progress = 0
-        self.progress.setValue(0)
-        
-        # Запускаем плавную анимацию загрузки
+        """Запускает анимацию загрузки"""
+        self.show()
+        self.fade_in_animation.start()
         QTimer.singleShot(500, self.animate_phase1)
     
     def animate_phase1(self):
-        """Плавная анимация первой фазы (0-20%)"""
         self.status.setText("Инициализация лаунчера...")
-        self.progress.setValueSmooth(20, 1000)
-        QTimer.singleShot(1100, self.animate_phase2)
+        self.progress.setValueSmooth(20)
+        QTimer.singleShot(1000, self.animate_phase2)
     
     def animate_phase2(self):
-        """Плавная анимация второй фазы (20-40%)"""
         self.status.setText("Проверка обновлений...")
-        self.progress.setValueSmooth(40, 1000)
-        QTimer.singleShot(1100, self.animate_phase3)
+        self.progress.setValueSmooth(40)
+        QTimer.singleShot(1000, self.animate_phase3)
     
     def animate_phase3(self):
-        """Плавная анимация третьей фазы (40-60%)"""
         self.status.setText("Загрузка настроек...")
-        self.progress.setValueSmooth(60, 1000)
-        QTimer.singleShot(1100, self.animate_phase4)
+        self.progress.setValueSmooth(60)
+        QTimer.singleShot(1000, self.animate_phase4)
     
     def animate_phase4(self):
-        """Плавная анимация четвертой фазы (60-80%)"""
         self.status.setText("Подготовка интерфейса...")
-        self.progress.setValueSmooth(80, 1000)
-        QTimer.singleShot(1100, self.animate_phase5)
+        self.progress.setValueSmooth(80)
+        QTimer.singleShot(1000, self.animate_phase5)
     
     def animate_phase5(self):
-        """Плавная анимация финальной фазы (80-100%)"""
         self.status.setText("Завершение загрузки...")
-        self.progress.setValueSmooth(100, 1200)
-        QTimer.singleShot(1300, self.complete_loading)
+        self.progress.setValueSmooth(100)
+        QTimer.singleShot(1000, self.complete_loading)
     
     def complete_loading(self):
-        """Завершает загрузку"""
-        self.status.setText("Загрузка завершена!")
-        self.progress.setValue(100)
         self.loading_finished = True
-        print("Загрузка завершена, готов к закрытию!")
-    
-    def fadeIn(self):
-        """Улучшенная анимация появления splash screen"""
-        print("Начинаю анимацию появления splash screen...")
-        
-        # Принудительно поднимаем окно наверх
-        self.raise_()
-        self.activateWindow()
-        
-        # Создаем анимацию появления
-        fade_in = QPropertyAnimation(self, b"windowOpacity")
-        fade_in.setDuration(1000)
-        fade_in.setStartValue(0.0)
-        fade_in.setEndValue(1.0)
-        fade_in.setEasingCurve(QEasingCurve.OutCubic)
-        
-        # Создаем анимацию масштабирования
-        scale_in = QPropertyAnimation(self, b"geometry")
-        scale_in.setDuration(1000)
-        initial_rect = self.geometry()
-        scaled_rect = initial_rect
-        scaled_rect.setSize(scaled_rect.size() * 0.95)
-        scale_in.setStartValue(scaled_rect)
-        scale_in.setEndValue(initial_rect)
-        scale_in.setEasingCurve(QEasingCurve.OutCubic)
-        
-        # Запускаем анимации параллельно
-        self.anim_group = QParallelAnimationGroup(self)
-        self.anim_group.addAnimation(fade_in)
-        self.anim_group.addAnimation(scale_in)
-        
-        # Показываем окно перед началом анимации
-        self.show()
-        self.raise_()
-        
-        # Запускаем анимацию
-        self.anim_group.start(QParallelAnimationGroup.DeleteWhenStopped)
-        
-        # Обрабатываем события
-        QApplication.processEvents()
-    
-    def fadeOut(self):
-        """Улучшенная анимация исчезновения splash screen"""
-        print("Начинаю анимацию исчезновения splash screen...")
-        
-        # Принудительно поднимаем окно наверх перед исчезновением
-        self.raise_()
-        
-        # Создаем анимацию исчезновения
-        fade_out = QPropertyAnimation(self, b"windowOpacity")
-        fade_out.setDuration(800)
-        fade_out.setStartValue(1.0)
-        fade_out.setEndValue(0.0)
-        fade_out.setEasingCurve(QEasingCurve.InCubic)
-        
-        # Создаем анимацию масштабирования
-        scale_out = QPropertyAnimation(self, b"geometry")
-        scale_out.setDuration(800)
-        initial_rect = self.geometry()
-        scaled_rect = initial_rect
-        scaled_rect.setSize(scaled_rect.size() * 1.05)
-        scale_out.setStartValue(initial_rect)
-        scale_out.setEndValue(scaled_rect)
-        scale_out.setEasingCurve(QEasingCurve.InCubic)
-        
-        # Запускаем анимации параллельно
-        self.anim_group = QParallelAnimationGroup(self)
-        self.anim_group.addAnimation(fade_out)
-        self.anim_group.addAnimation(scale_out)
-        self.anim_group.start(QParallelAnimationGroup.DeleteWhenStopped)
-        
-        return self.anim_group
+        self.status.setText("Загрузка завершена!")
     
     def finish(self, window):
-        """Завершает отображение splash screen и показывает основное окно"""
         if not self.loading_finished:
             self.complete_loading()
-            
-        print("Начинаю процесс закрытия splash screen...")
         
-        # Создаем и запускаем анимацию исчезновения
-        fade_anim = self.fadeOut()
+        # Анимация исчезновения
+        fade_out = QParallelAnimationGroup(self)
+        
+        for widget in [self.logo_label, self.title, self.version, self.status, self.progress]:
+            if widget.graphicsEffect():
+                anim = QPropertyAnimation(widget.graphicsEffect(), b"opacity")
+                anim.setDuration(500)
+                anim.setStartValue(1.0)
+                anim.setEndValue(0.0)
+                anim.setEasingCurve(QEasingCurve.InCubic)
+                fade_out.addAnimation(anim)
         
         def show_main_window():
-            print("Показываю главное окно...")
-            
-            # Устанавливаем флаги окна для отображения поверх других
-            window.setWindowState(window.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
-            window.setWindowFlags(window.windowFlags() | Qt.WindowStaysOnTopHint)
-            
-            # Показываем окно
             window.show()
-            
-            # Центрируем окно на экране
-            screen = QApplication.primaryScreen().geometry()
-            window.move(
-                screen.center().x() - window.width() // 2,
-                screen.center().y() - window.height() // 2
-            )
-            
-            # Активируем окно и поднимаем его поверх других
             window.raise_()
             window.activateWindow()
-            
-            # Возвращаем обычные флаги окна после небольшой задержки
-            QTimer.singleShot(1000, lambda: window.setWindowFlags(window.windowFlags() & ~Qt.WindowStaysOnTopHint))
-            QTimer.singleShot(1100, window.show)  # Показываем окно снова после изменения флагов
-            
-            # Скрываем splash screen после того как главное окно стало видимым
-            QTimer.singleShot(100, self.hide)
-            QTimer.singleShot(200, self.deleteLater)
-            print("Главное окно отображено.")
+            self.hide()
         
-        # Подключаем функцию к сигналу завершения анимации
-        fade_anim.finished.connect(show_main_window)
-        
-        # Страховка с меньшей задержкой
-        QTimer.singleShot(800, lambda: show_main_window() if not window.isVisible() else None) 
+        fade_out.finished.connect(show_main_window)
+        fade_out.start() 

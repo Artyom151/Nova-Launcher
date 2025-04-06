@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QStackedWidget, QFileDialog, QScrollArea, QListWidget, QDialog,
                              QFormLayout, QTabWidget, QCheckBox, QSystemTrayIcon, QMenu,
                              QListWidgetItem, QGroupBox, QSpinBox, QSizePolicy, QButtonGroup,
-                             QErrorMessage, QSplashScreen)
+                             QErrorMessage, QSplashScreen, QGraphicsDropShadowEffect)
 from PySide6.QtGui import QFont, QFontDatabase, QIcon, QPixmap, QPalette, QBrush, QAction, QColor
 from PySide6.QtCore import (Qt, QThread, Signal, QTimer, QPoint, QPropertyAnimation, 
                            QEasingCurve, QParallelAnimationGroup, QAbstractAnimation)
@@ -33,15 +33,18 @@ class MinecraftVersionInstaller(QThread):
     finished = Signal()
     error = Signal(str)
 
-    def __init__(self, version, minecraft_directory):
+    def __init__(self, version, minecraft_directory, is_repair=False):
         super().__init__()
         self.version = version
         self.minecraft_directory = minecraft_directory
+        self.is_repair = is_repair
 
     def run(self):
         try:
             def set_status(status: str):
-                self.progress.emit(-1, status)
+                # Добавляем префикс в зависимости от типа операции
+                prefix = "Восстановление: " if self.is_repair else "Установка: "
+                self.progress.emit(-1, f"{prefix}{status}")
 
             def set_progress(value: int):
                 self.progress.emit(value, "")
@@ -305,7 +308,10 @@ class MinecraftLauncher(QMainWindow):
     def __init__(self):
         super().__init__()
         # Устанавливаем версию лаунчера
-        self.launcher_version = "1.5"
+        self.launcher_version = "1.6"
+        
+        # Устанавливаем флаги окна для корректного отображения кнопок управления
+        self.setWindowFlags(Qt.Window)
         
         # Изменяем пути файлов для использования кастомной директории
         self.nova_directory = os.path.join(os.path.expanduser("~"), ".nova_launcher")
@@ -347,13 +353,31 @@ class MinecraftLauncher(QMainWindow):
         else:
             self.minecraft_font = QFont("Arial", self.settings.get("font_size", 10))
 
-        # Load profiles first
-        self.load_profiles()
-
-        # Create profile combo
+        # Инициализируем profile_combo перед загрузкой профилей
         self.profile_combo = QComboBox()
         self.profile_combo.setFont(self.minecraft_font)
         self.profile_combo.currentIndexChanged.connect(self.profile_changed)
+
+        # Инициализируем profiles_list и settings_profiles_list
+        self.profiles_list = QListWidget()
+        self.profiles_list.setFont(self.minecraft_font)
+        
+        self.settings_profiles_list = QListWidget()
+        self.settings_profiles_list.setFont(self.minecraft_font)
+        self.settings_profiles_list.currentItemChanged.connect(self.profile_selected)
+
+        # Инициализируем labels для информации о профиле
+        self.profile_name_label = QLabel()
+        self.profile_username_label = QLabel()
+        self.profile_version_label = QLabel()
+        self.profile_last_played_label = QLabel()
+        
+        for label in [self.profile_name_label, self.profile_username_label, 
+                     self.profile_version_label, self.profile_last_played_label]:
+            label.setFont(self.minecraft_font)
+
+        # Load profiles
+        self.load_profiles()
         self.update_profile_combo()
 
         # Create main widget and layout
@@ -366,20 +390,10 @@ class MinecraftLauncher(QMainWindow):
         # Create and setup sidebar
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(200)
+        sidebar.setFixedWidth(275)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(0)
-
-        # Add profile selector to sidebar
-        profile_layout = QHBoxLayout()
-        add_profile_button = QPushButton("+")
-        add_profile_button.setFont(self.minecraft_font)
-        add_profile_button.setFixedSize(30, 30)
-        add_profile_button.clicked.connect(self.add_profile)
-        profile_layout.addWidget(self.profile_combo)
-        profile_layout.addWidget(add_profile_button)
-        sidebar_layout.addLayout(profile_layout)
 
         # Add logo to sidebar
         logo_label = QLabel()
@@ -406,13 +420,41 @@ class MinecraftLauncher(QMainWindow):
         # Create sidebar buttons and add stretch
         self.sidebar_buttons = []
         sidebar_layout.addStretch()
+
+        # Create profile selector container at bottom
+        profile_container = QWidget()
+        profile_container.setObjectName("profileContainer")
+        profile_layout = QVBoxLayout(profile_container)
+        profile_layout.setContentsMargins(15, 10, 15, 10)
+        profile_layout.setSpacing(5)
+
+        # Add profile selector to container
+        profile_selector = QWidget()
+        profile_selector_layout = QHBoxLayout(profile_selector)
+        profile_selector_layout.setContentsMargins(0, 0, 0, 0)
+        profile_selector_layout.setSpacing(5)
+
+        profile_selector_layout.addWidget(self.profile_combo)
+
+        add_profile_button = QPushButton("+")
+        add_profile_button.setFont(self.minecraft_font)
+        add_profile_button.setFixedSize(30, 30)
+        add_profile_button.clicked.connect(self.add_profile)
+        add_profile_button.setObjectName("addProfileButton")
+
+        profile_selector_layout.addWidget(add_profile_button)
+
+        profile_layout.addWidget(profile_selector)
         
         # Add version info at bottom of sidebar
         version_label = QLabel(f"Nova Launcher {self.launcher_version}")
         version_label.setFont(self.minecraft_font)
         version_label.setAlignment(Qt.AlignCenter)
         version_label.setObjectName("versionLabel")
-        sidebar_layout.addWidget(version_label)
+        profile_layout.addWidget(version_label)
+
+        # Add profile container to sidebar
+        sidebar_layout.addWidget(profile_container)
         
         # Add widgets to main layout
         main_layout.addWidget(sidebar)
@@ -465,9 +507,58 @@ class MinecraftLauncher(QMainWindow):
         additional_styles = """
             /* Боковая панель */
             #sidebar {
-                background-color: rgba(18, 18, 18, 0.95);
-                border-right: 1px solid rgba(255, 255, 255, 0.1);
-                padding: 10px 0;
+                background: rgba(40, 40, 40, 0.55);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 15px 0;
+                border-radius: 20px;
+                margin: 10px;
+            }
+
+            /* Эффект стекла для сайдбара */
+            #sidebar {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(40, 40, 40, 0.75),
+                    stop:0.5 rgba(45, 45, 45, 0.65),
+                    stop:1 rgba(40, 40, 40, 0.75));
+                backdrop-filter: blur(30px);
+                -webkit-backdrop-filter: blur(30px);
+            }
+
+            /* Профиль контейнер */
+            #profileContainer {
+                background: rgba(30, 30, 30, 0.4);
+                border-top: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 10px;
+                border-bottom-left-radius: 20px;
+                border-bottom-right-radius: 20px;
+                margin-bottom: -15px;
+            }
+
+            /* Комбобокс профиля */
+            QComboBox {
+                background: rgba(45, 45, 45, 0.7);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 8px;
+                padding: 5px 10px;
+                color: white;
+                min-width: 180px;
+                max-width: 200px;
+            }
+
+            QComboBox:hover {
+                background: rgba(50, 50, 50, 0.8);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+            }
+
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+
+            QComboBox::down-arrow {
+                image: url(Resources/down_arrow.png);
+                width: 12px;
+                height: 12px;
             }
 
             /* Кнопки боковой панели */
@@ -476,31 +567,55 @@ class MinecraftLauncher(QMainWindow):
                 border: none;
                 color: rgba(255, 255, 255, 0.7);
                 text-align: left;
-                padding: 12px 25px;
-                font-size: 14px;
-                border-radius: 0;
-                margin: 2px 10px;
+                padding: 15px 35px;
+                font-size: 16px;
+                border-radius: 12px;
+                margin: 3px 20px;
+                letter-spacing: 1px;
             }
 
             #sidebarButton:hover {
-                background-color: rgba(255, 255, 255, 0.1);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(67, 160, 71, 0.2),
+                    stop:0.5 rgba(76, 175, 80, 0.2),
+                    stop:1 rgba(67, 160, 71, 0.2));
                 color: white;
-                border-radius: 6px;
             }
 
             #sidebarButton:checked {
-                background-color: rgba(67, 160, 71, 0.2);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(67, 160, 71, 0.3),
+                    stop:0.5 rgba(76, 175, 80, 0.3),
+                    stop:1 rgba(67, 160, 71, 0.3));
                 color: #4CAF50;
-                border-radius: 6px;
                 font-weight: bold;
+            }
+
+            /* Кнопка добавления профиля */
+            #addProfileButton {
+                background: rgba(67, 160, 71, 0.2);
+                border: 1px solid rgba(67, 160, 71, 0.3);
+                border-radius: 8px;
+                color: white;
+                padding: 2px;
+                font-size: 16px;
+            }
+
+            #addProfileButton:hover {
+                background: rgba(67, 160, 71, 0.3);
+                border: 1px solid rgba(67, 160, 71, 0.4);
+            }
+
+            #addProfileButton:pressed {
+                background: rgba(67, 160, 71, 0.4);
             }
 
             /* Версия лаунчера */
             #versionLabel {
                 color: rgba(255, 255, 255, 0.5);
-                padding: 15px;
-                font-size: 12px;
-                border-top: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 10px;
+                font-size: 13px;
+                letter-spacing: 1px;
             }
 
             /* Основные виджеты */
@@ -510,32 +625,34 @@ class MinecraftLauncher(QMainWindow):
 
             /* Поля ввода */
             QLineEdit {
-                background-color: rgba(30, 30, 30, 0.95);
+                background: rgba(30, 30, 30, 0.95);
                 color: white;
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                padding: 10px;
-                border-radius: 6px;
+                padding: 12px;
+                border-radius: 8px;
                 selection-background-color: #4CAF50;
+                font-size: 14px;
             }
 
             QLineEdit:focus {
                 border: 1px solid rgba(76, 175, 80, 0.5);
-                background-color: rgba(35, 35, 35, 0.95);
+                background: rgba(35, 35, 35, 0.95);
             }
 
             /* Выпадающие списки */
             QComboBox {
-                background-color: rgba(30, 30, 30, 0.95);
+                background: rgba(30, 30, 30, 0.95);
                 color: white;
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                padding: 10px;
-                border-radius: 6px;
+                padding: 12px;
+                border-radius: 8px;
                 min-width: 200px;
+                font-size: 14px;
             }
 
             QComboBox:hover {
                 border: 1px solid rgba(76, 175, 80, 0.5);
-                background-color: rgba(35, 35, 35, 0.95);
+                background: rgba(35, 35, 35, 0.95);
             }
 
             QComboBox::drop-down {
@@ -550,114 +667,126 @@ class MinecraftLauncher(QMainWindow):
             }
 
             QComboBox QAbstractItemView {
-                background-color: rgba(30, 30, 30, 0.95);
+                background: rgba(30, 30, 30, 0.98);
                 border: 1px solid rgba(255, 255, 255, 0.1);
                 selection-background-color: rgba(76, 175, 80, 0.3);
                 selection-color: white;
-                border-radius: 6px;
+                border-radius: 8px;
+                padding: 5px;
             }
 
             /* Кнопка запуска */
             QPushButton#playButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
                     stop:0 #43A047, 
-                    stop:1 #4CAF50);
+                    stop:0.5 #4CAF50,
+                    stop:1 #43A047);
                 color: white;
                 border: none;
-                border-radius: 8px;
-                padding: 15px 30px;
-                font-size: 16px;
+                border-radius: 10px;
+                padding: 18px 35px;
+                font-size: 18px;
                 font-weight: bold;
-                min-height: 50px;
+                min-height: 55px;
+                letter-spacing: 1px;
             }
 
             QPushButton#playButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
                     stop:0 #388E3C, 
-                    stop:1 #43A047);
+                    stop:0.5 #43A047,
+                    stop:1 #388E3C);
+                transform: scale(1.02);
             }
 
             QPushButton#playButton:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
                     stop:0 #2E7D32, 
-                    stop:1 #388E3C);
+                    stop:0.5 #388E3C,
+                    stop:1 #2E7D32);
+                transform: scale(0.98);
             }
 
             /* Прогресс бар */
             QProgressBar {
                 border: none;
-                border-radius: 4px;
+                border-radius: 5px;
                 text-align: center;
-                background-color: rgba(30, 30, 30, 0.95);
-                height: 8px;
+                background: rgba(30, 30, 30, 0.95);
+                height: 10px;
             }
 
             QProgressBar::chunk {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
                     stop:0 #43A047, 
-                    stop:1 #4CAF50);
-                border-radius: 4px;
+                    stop:0.5 #4CAF50,
+                    stop:1 #66BB6A);
+                border-radius: 5px;
             }
 
             /* Метки */
             QLabel {
                 color: rgba(255, 255, 255, 0.9);
+                font-size: 14px;
             }
 
             QLabel#profileInfo {
-                background-color: rgba(30, 30, 30, 0.95);
-                padding: 20px;
-                border-radius: 8px;
-                font-size: 14px;
+                background: rgba(30, 30, 30, 0.95);
+                padding: 25px;
+                border-radius: 12px;
+                font-size: 15px;
                 border: 1px solid rgba(255, 255, 255, 0.1);
+                letter-spacing: 0.5px;
             }
 
             /* Списки */
             QListWidget {
-                background-color: rgba(30, 30, 30, 0.95);
+                background: rgba(30, 30, 30, 0.95);
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 8px;
-                padding: 5px;
+                border-radius: 10px;
+                padding: 8px;
             }
 
             QListWidget::item {
-                padding: 10px;
-                border-radius: 4px;
-                margin: 2px;
+                padding: 12px;
+                border-radius: 6px;
+                margin: 3px;
             }
 
             QListWidget::item:selected {
-                background-color: rgba(76, 175, 80, 0.3);
+                background: rgba(76, 175, 80, 0.3);
                 color: white;
             }
 
             QListWidget::item:hover {
-                background-color: rgba(255, 255, 255, 0.1);
+                background: rgba(255, 255, 255, 0.1);
             }
 
             /* Вкладки */
             QTabWidget::pane {
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 8px;
-                background-color: rgba(30, 30, 30, 0.95);
+                border-radius: 10px;
+                background: rgba(30, 30, 30, 0.95);
             }
 
             QTabBar::tab {
-                background-color: rgba(30, 30, 30, 0.95);
+                background: rgba(30, 30, 30, 0.95);
                 color: rgba(255, 255, 255, 0.7);
-                padding: 10px 20px;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                margin-right: 2px;
+                padding: 12px 25px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                margin-right: 3px;
+                font-size: 14px;
             }
 
             QTabBar::tab:selected {
-                background-color: rgba(76, 175, 80, 0.2);
+                background: rgba(76, 175, 80, 0.2);
                 color: #4CAF50;
+                font-weight: bold;
             }
 
             QTabBar::tab:hover:!selected {
-                background-color: rgba(255, 255, 255, 0.1);
+                background: rgba(255, 255, 255, 0.1);
                 color: white;
             }
 
@@ -665,14 +794,14 @@ class MinecraftLauncher(QMainWindow):
             QScrollBar:vertical {
                 border: none;
                 background: rgba(30, 30, 30, 0.95);
-                width: 10px;
+                width: 12px;
                 margin: 0;
             }
 
             QScrollBar::handle:vertical {
                 background: rgba(76, 175, 80, 0.3);
-                border-radius: 5px;
-                min-height: 20px;
+                border-radius: 6px;
+                min-height: 25px;
             }
 
             QScrollBar::handle:vertical:hover {
@@ -686,28 +815,31 @@ class MinecraftLauncher(QMainWindow):
             /* Групповые боксы */
             QGroupBox {
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 8px;
-                padding: 15px;
-                margin-top: 20px;
+                border-radius: 10px;
+                padding: 20px;
+                margin-top: 25px;
+                background: rgba(30, 30, 30, 0.95);
             }
 
             QGroupBox::title {
                 color: rgba(255, 255, 255, 0.9);
                 subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
+                left: 15px;
+                padding: 0 8px;
+                font-size: 15px;
             }
 
             /* Чекбоксы */
             QCheckBox {
                 color: rgba(255, 255, 255, 0.9);
-                spacing: 5px;
+                spacing: 8px;
+                font-size: 14px;
             }
 
             QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border-radius: 4px;
+                width: 22px;
+                height: 22px;
+                border-radius: 5px;
                 border: 1px solid rgba(255, 255, 255, 0.1);
                 background: rgba(30, 30, 30, 0.95);
             }
@@ -723,35 +855,39 @@ class MinecraftLauncher(QMainWindow):
 
             /* Стандартные кнопки */
             QPushButton {
-                background-color: rgba(30, 30, 30, 0.95);
+                background: rgba(30, 30, 30, 0.95);
                 border: 1px solid rgba(255, 255, 255, 0.1);
                 color: white;
-                padding: 8px 16px;
-                border-radius: 6px;
+                padding: 10px 20px;
+                border-radius: 8px;
+                font-size: 14px;
+                letter-spacing: 0.5px;
             }
 
             QPushButton:hover {
-                background-color: rgba(76, 175, 80, 0.2);
+                background: rgba(76, 175, 80, 0.2);
                 border: 1px solid rgba(76, 175, 80, 0.5);
             }
 
             QPushButton:pressed {
-                background-color: rgba(76, 175, 80, 0.3);
+                background: rgba(76, 175, 80, 0.3);
             }
 
             /* Спинбоксы */
             QSpinBox {
-                background-color: rgba(30, 30, 30, 0.95);
+                background: rgba(30, 30, 30, 0.95);
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                padding: 8px;
-                border-radius: 6px;
+                padding: 10px;
+                border-radius: 8px;
                 color: white;
+                font-size: 14px;
             }
 
             QSpinBox::up-button, QSpinBox::down-button {
                 border: none;
                 background: rgba(76, 175, 80, 0.2);
-                border-radius: 3px;
+                border-radius: 4px;
+                width: 20px;
             }
 
             QSpinBox::up-button:hover, QSpinBox::down-button:hover {
@@ -760,11 +896,29 @@ class MinecraftLauncher(QMainWindow):
 
             /* Всплывающие подсказки */
             QToolTip {
-                background-color: rgba(18, 18, 18, 0.95);
+                background: rgba(18, 18, 18, 0.98);
                 color: white;
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 4px;
-                padding: 5px;
+                border-radius: 6px;
+                padding: 8px;
+                font-size: 13px;
+            }
+
+            /* Анимации */
+            * {
+                transition: all 0.2s ease-in-out;
+            }
+
+            QPushButton {
+                transition: background-color 0.2s, border-color 0.2s, transform 0.1s;
+            }
+
+            QComboBox {
+                transition: background-color 0.2s, border-color 0.2s;
+            }
+
+            QLineEdit {
+                transition: background-color 0.2s, border-color 0.2s;
             }
         """
         
@@ -868,11 +1022,55 @@ class MinecraftLauncher(QMainWindow):
         versions_layout.addWidget(save_versions_button)
         versions_layout.addStretch()
         
+        # ================ Таб для управления профилями ================
+        profiles_tab = QWidget()
+        profiles_layout = QVBoxLayout(profiles_tab)
+        
+        # Список профилей
+        self.settings_profiles_list = QListWidget()
+        self.settings_profiles_list.setFont(self.minecraft_font)
+        
+        # Кнопки управления профилями
+        profiles_buttons_layout = QHBoxLayout()
+        
+        add_profile_button = QPushButton("Добавить")
+        edit_profile_button = QPushButton("Редактировать")
+        delete_profile_button = QPushButton("Удалить")
+        duplicate_profile_button = QPushButton("Дублировать")
+        
+        for button in [add_profile_button, edit_profile_button, delete_profile_button, duplicate_profile_button]:
+            button.setFont(self.minecraft_font)
+            profiles_buttons_layout.addWidget(button)
+        
+        add_profile_button.clicked.connect(self.add_profile)
+        edit_profile_button.clicked.connect(lambda: self.edit_profile_from_settings())
+        delete_profile_button.clicked.connect(lambda: self.delete_profile_from_settings())
+        duplicate_profile_button.clicked.connect(lambda: self.duplicate_profile_from_settings())
+        
+        profiles_layout.addWidget(self.settings_profiles_list)
+        profiles_layout.addLayout(profiles_buttons_layout)
+        
+        # Информация о профиле
+        profile_info_group = QGroupBox("Информация о профиле")
+        profile_info_group.setFont(self.minecraft_font)
+        profile_info_layout = QVBoxLayout(profile_info_group)
+        
+        self.settings_profile_info = QLabel()
+        self.settings_profile_info.setFont(self.minecraft_font)
+        self.settings_profile_info.setWordWrap(True)
+        profile_info_layout.addWidget(self.settings_profile_info)
+        
+        profiles_layout.addWidget(profile_info_group)
+        
+        # Обновляем список профилей
+        self.update_settings_profiles_list()
+        
         # ================ Остальные табы остаются без изменений ================
         
         # Добавляем все табы
         tabs.addTab(memory_tab, "Память")
         tabs.addTab(versions_tab, "Версии")
+        tabs.addTab(profiles_tab, "Профили")  # Добавляем новую вкладку
         tabs.addTab(self.create_dirs_tab(), "Директории")
         tabs.addTab(self.create_advanced_tab(), "Дополнительно")
         tabs.addTab(self.create_data_tab(), "Данные")
@@ -972,7 +1170,7 @@ class MinecraftLauncher(QMainWindow):
         progress_layout.setSpacing(10)
         
         # Progress bar
-        self.progress_bar = SimpleProgressBar()
+        self.progress_bar = BeautifulProgressBar()
         self.progress_bar.setVisible(False)
         
         # Progress label with improved style
@@ -1495,6 +1693,14 @@ class MinecraftLauncher(QMainWindow):
             self.version_combo.clear()
             versions_to_show = []
             
+            # Словарь с иконками для разных типов версий
+            version_icons = {
+                "release": QIcon(os.path.join("Resources", "release_icon.png")),
+                "snapshot": QIcon(os.path.join("Resources", "snapshot_icon.png")),
+                "old_beta": QIcon(os.path.join("Resources", "beta_icon.png")),
+                "old_alpha": QIcon(os.path.join("Resources", "alpha_icon.png"))
+            }
+            
             try:
                 # Получаем полный список версий
                 version_list = minecraft_launcher_lib.utils.get_version_list()
@@ -1533,22 +1739,37 @@ class MinecraftLauncher(QMainWindow):
                             versions_to_show.append(version)
                     versions_to_show.sort(key=lambda x: x.get("releaseTime", ""), reverse=True)
                 
-                # Добавляем версии в комбобокс
+                # Добавляем версии в комбобокс с соответствующими иконками
                 for version in versions_to_show:
-                    self.version_combo.addItem(version["id"])
+                    version_type = version.get("type", "release")
+                    version_id = version["id"]
+                    
+                    # Получаем иконку для типа версии
+                    icon = version_icons.get(version_type, version_icons["release"])
+                    
+                    # Добавляем версию с иконкой
+                    self.version_combo.addItem(icon, version_id)
+                    
+                    # Если версия установлена, добавляем метку
+                    if version["is_installed"]:
+                        index = self.version_combo.findText(version_id)
+                        if index >= 0:
+                            self.version_combo.setItemIcon(index, icon)
                     
             except Exception as e:
                 print(f"Ошибка при получении онлайн-списка версий: {str(e)}")
                 # В случае ошибки получения онлайн-списка, используем установленные версии
                 installed_versions = minecraft_launcher_lib.utils.get_installed_versions(self.minecraft_directory)
                 for version in installed_versions:
-                    self.version_combo.addItem(version["id"])
+                    version_type = version.get("type", "release")
+                    icon = version_icons.get(version_type, version_icons["release"])
+                    self.version_combo.addItem(icon, version["id"])
             
             # Если список все еще пуст, добавляем базовые версии
             if self.version_combo.count() == 0:
                 default_versions = ["1.20.4", "1.20.2", "1.20.1", "1.19.4", "1.19.3", "1.19.2", "1.18.2"]
                 for version in default_versions:
-                    self.version_combo.addItem(version)
+                    self.version_combo.addItem(version_icons["release"], version)
             
             # Восстанавливаем последнюю использованную версию или версию по умолчанию
             last_version = self.settings.get("last_version", "")
@@ -1632,8 +1853,8 @@ class MinecraftLauncher(QMainWindow):
                     self.progress_label.setVisible(True)
                     self.play_button.setEnabled(False)
                     
-                    # Install version
-                    self.installer = MinecraftVersionInstaller(selected_version, self.minecraft_directory)
+                    # Install version with is_repair=False flag
+                    self.installer = MinecraftVersionInstaller(selected_version, self.minecraft_directory, is_repair=False)
                     self.installer.progress.connect(self.update_progress)
                     self.installer.finished.connect(lambda: self.finish_minecraft_launch(selected_version, username))
                     self.installer.error.connect(self.show_error)
@@ -1805,13 +2026,16 @@ class MinecraftLauncher(QMainWindow):
             self.profile_combo.setCurrentIndex(last_profile_index)
 
     def profile_changed(self, index):
+        """Обрабатывает изменение выбранного профиля"""
         if index >= 0:
-            self.update_profile_info()
+            # Обновляем информацию в главном окне
+            self.update_profile_info_main()
             # Сохраняем текущий индекс профиля
             self.settings["last_profile_index"] = index
             self.save_settings()
 
-    def update_profile_info(self):
+    def update_profile_info_main(self):
+        """Обновляет информацию о профиле в главном окне"""
         if hasattr(self, 'profile_info_label') and self.profile_combo.currentIndex() >= 0:
             current_profile = self.profiles[self.profile_combo.currentIndex()]
             info_text = f"Текущий профиль: {current_profile['name']}\nИгрок: {current_profile['username']}"
@@ -1826,6 +2050,41 @@ class MinecraftLauncher(QMainWindow):
                     info_text = f"  {info_text}"  # Добавляем отступ для иконки
             
             self.profile_info_label.setText(info_text)
+
+    def update_profile_info(self):
+        """Обновляет информацию о выбранном профиле в окне профилей"""
+        if not hasattr(self, 'settings_profiles_list'):
+            return
+            
+        current_item = self.settings_profiles_list.currentItem()
+        if not current_item:
+            return
+            
+        profile = current_item.data(Qt.UserRole)
+        if not profile:
+            return
+            
+        # Обновляем основную информацию
+        self.profile_name_label.setText(profile["name"])
+        self.profile_username_label.setText(profile["username"])
+        self.profile_version_label.setText(profile.get("last_version", "Не выбрана"))
+        
+        last_played = profile.get("last_played", "Никогда")
+        if last_played != "Никогда":
+            try:
+                last_played = datetime.fromtimestamp(last_played).strftime("%d.%m.%Y %H:%M")
+            except:
+                last_played = "Неизвестно"
+        self.profile_last_played_label.setText(last_played)
+        
+        # Обновляем настройки Java
+        self.java_path_input.setText(profile.get("java_path", ""))
+        self.min_memory.setValue(profile.get("min_memory", 2048))
+        self.max_memory.setValue(profile.get("max_memory", 4096))
+        
+        # Обновляем дополнительные настройки
+        self.close_game_checkbox.setChecked(profile.get("close_game", False))
+        self.custom_resolution_checkbox.setChecked(profile.get("custom_resolution", False))
 
     def add_profile(self):
         dialog = ProfileDialog(self)
@@ -1949,14 +2208,20 @@ class MinecraftLauncher(QMainWindow):
         tray_menu = QMenu()
         
         open_action = QAction("Открыть лаунчер", self)
-        open_action.triggered.connect(self.show)
+        open_action.triggered.connect(self.show_from_tray)
         
-        exit_action = QAction("Выход", self)
-        exit_action.triggered.connect(self.close)
+        background_mode_action = QAction("Фоновый режим", self)
+        background_mode_action.setCheckable(True)
+        background_mode_action.setChecked(self.settings.get("background_mode", True))
+        background_mode_action.triggered.connect(self.toggle_background_mode)
+        
+        close_action = QAction("Закрыть", self)
+        close_action.triggered.connect(self.force_quit)
         
         tray_menu.addAction(open_action)
+        tray_menu.addAction(background_mode_action)
         tray_menu.addSeparator()
-        tray_menu.addAction(exit_action)
+        tray_menu.addAction(close_action)
         
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.tray_icon_activated)
@@ -1965,12 +2230,34 @@ class MinecraftLauncher(QMainWindow):
         if self.settings.get("show_tray_icon", True):
             self.tray_icon.show()
     
+    def show_from_tray(self):
+        """Показывает окно из трея"""
+        self.show()
+        self.activateWindow()
+        self.raise_()
+    
+    def toggle_background_mode(self, state):
+        """Включает/выключает фоновый режим"""
+        self.settings["background_mode"] = state
+        self.save_settings()
+        
+        if not state and self.isHidden():
+            self.show_from_tray()
+    
     def tray_icon_activated(self, reason):
+        """Обрабатывает клик по иконке в трее"""
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             if self.isHidden():
-                self.show()
+                self.show_from_tray()
             else:
                 self.hide()
+                if self.settings.get("background_mode", True):
+                    self.tray_icon.showMessage(
+                        "Nova Launcher",
+                        "Лаунчер продолжает работать в фоновом режиме",
+                        QSystemTrayIcon.Information,
+                        2000
+                    )
                 
     def check_for_updates(self):
         """Проверяет наличие обновлений лаунчера"""
@@ -1996,19 +2283,35 @@ class MinecraftLauncher(QMainWindow):
             
     def closeEvent(self, event):
         """Обрабатывает закрытие окна"""
-        if self.settings.get("minimize_to_tray", True) and self.settings.get("show_tray_icon", True):
-            event.ignore()
-            self.hide()
-            
-            # Показываем уведомление
-            self.tray_icon.showMessage(
-                "Nova Launcher",
-                "Лаунчер продолжает работать в фоновом режиме",
-                QSystemTrayIcon.Information,
-                2000
-            )
+        if self.settings.get("background_mode", True):
+            if not getattr(self, '_force_quit', False):
+                event.ignore()
+                self.hide()
+                if hasattr(self, "tray_icon") and self.tray_icon.isVisible():
+                    self.tray_icon.showMessage(
+                        "Nova Launcher",
+                        "Лаунчер продолжает работать в фоновом режиме",
+                        QSystemTrayIcon.Information,
+                        2000
+                    )
+            else:
+                event.accept()
         else:
-            event.accept()
+            reply = QMessageBox.question(
+                self,
+                "Подтверждение",
+                "Вы уверены, что хотите закрыть лаунчер?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                event.accept()
+            else:
+                event.ignore()
+
+    def force_quit(self):
+        """Принудительно закрывает приложение"""
+        self._force_quit = True
+        self.close()
 
     def browse_download_location(self):
         """Выбор директории для загрузки Minecraft"""
@@ -2068,7 +2371,6 @@ class MinecraftLauncher(QMainWindow):
         """Сохранение дополнительных настроек"""
         try:
             self.settings["show_tray_icon"] = self.show_tray_checkbox.isChecked()
-            self.settings["minimize_to_tray"] = self.minimize_to_tray_checkbox.isChecked()
             self.settings["auto_check_updates"] = self.auto_check_updates_checkbox.isChecked()
             self.settings["auto_update"] = self.auto_update_combo.currentText()
             self.settings["close_launcher"] = self.close_launcher_combo.currentText()
@@ -2380,18 +2682,18 @@ class MinecraftLauncher(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить настройки: {str(e)}")
 
     def create_profiles_page(self):
+        """Создает страницу управления профилями"""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(15)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(20)
 
-        # Заголовок страницы
-        title_label = QLabel("Профили")
+        # Заголовок
+        title_label = QLabel("Управление профилями")
+        title_label.setFont(QFont(self.minecraft_font.family(), 24))
         title_label.setStyleSheet("""
             QLabel {
                 color: white;
-                font-size: 24px;
-                font-weight: bold;
                 padding: 10px;
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #43A047,
@@ -2402,42 +2704,43 @@ class MinecraftLauncher(QMainWindow):
         """)
         layout.addWidget(title_label)
 
-        # Контейнер для списка и кнопок
-        container = QWidget()
-        container_layout = QHBoxLayout(container)
-        container_layout.setSpacing(20)
+        # Контейнер для основного содержимого
+        content_widget = QWidget()
+        content_layout = QHBoxLayout(content_widget)
+        content_layout.setSpacing(20)
 
         # Левая панель со списком профилей
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setSpacing(10)
 
-        # Список профилей
+        # Список профилей с улучшенным стилем
         self.profiles_list = QListWidget()
+        self.profiles_list.setFont(self.minecraft_font)
         self.profiles_list.setStyleSheet("""
             QListWidget {
-                background-color: rgba(255, 255, 255, 10);
-                border: 1px solid rgba(255, 255, 255, 30);
+                background-color: rgba(30, 30, 30, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
                 border-radius: 10px;
                 padding: 5px;
-                color: white;
             }
             QListWidget::item {
-                background-color: rgba(255, 255, 255, 5);
-                border: 1px solid rgba(255, 255, 255, 20);
+                color: white;
+                background-color: rgba(45, 45, 45, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
                 border-radius: 5px;
-                padding: 8px;
+                padding: 10px;
                 margin: 2px;
             }
             QListWidget::item:selected {
-                background-color: rgba(67, 160, 71, 0.5);
+                background-color: rgba(76, 175, 80, 0.3);
                 border: 1px solid #4CAF50;
             }
             QListWidget::item:hover {
-                background-color: rgba(255, 255, 255, 15);
+                background-color: rgba(255, 255, 255, 0.1);
             }
         """)
-        left_layout.addWidget(self.profiles_list)
+        self.profiles_list.currentItemChanged.connect(self.profile_selected)
 
         # Кнопки управления профилями
         buttons_widget = QWidget()
@@ -2445,118 +2748,206 @@ class MinecraftLauncher(QMainWindow):
         buttons_layout.setSpacing(10)
 
         add_button = QPushButton("Добавить")
-        remove_button = QPushButton("Удалить")
         edit_button = QPushButton("Редактировать")
+        delete_button = QPushButton("Удалить")
+        duplicate_button = QPushButton("Дублировать")
 
-        for button in [add_button, remove_button, edit_button]:
+        for button in [add_button, edit_button, delete_button, duplicate_button]:
+            button.setFont(self.minecraft_font)
+            button.setMinimumHeight(40)
+            button.setCursor(Qt.PointingHandCursor)
             button.setStyleSheet("""
                 QPushButton {
-                    background-color: rgba(255, 255, 255, 10);
-                    border: 1px solid rgba(255, 255, 255, 30);
+                    background-color: rgba(45, 45, 45, 0.95);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
                     border-radius: 5px;
                     color: white;
                     padding: 8px 15px;
-                    font-weight: bold;
                 }
                 QPushButton:hover {
-                    background-color: rgba(67, 160, 71, 0.5);
+                    background-color: rgba(76, 175, 80, 0.3);
                     border: 1px solid #4CAF50;
                 }
                 QPushButton:pressed {
-                    background-color: rgba(67, 160, 71, 0.7);
+                    background-color: rgba(76, 175, 80, 0.5);
                 }
             """)
-            buttons_layout.addWidget(button)
-
-        left_layout.addWidget(buttons_widget)
-        container_layout.addWidget(left_panel)
-
-        # Правая панель с настройками профиля
+        
+        # Добавляем кнопки в два ряда
+        top_buttons_layout = QHBoxLayout()
+        top_buttons_layout.addWidget(add_button)
+        top_buttons_layout.addWidget(edit_button)
+        top_buttons_layout.addWidget(delete_button)
+        
+        bottom_buttons_layout = QHBoxLayout()
+        bottom_buttons_layout.addWidget(duplicate_button)
+        
+        buttons_container = QWidget()
+        buttons_container_layout = QVBoxLayout(buttons_container)
+        buttons_container_layout.addLayout(top_buttons_layout)
+        buttons_container_layout.addLayout(bottom_buttons_layout)
+        
+        add_button.clicked.connect(self.add_profile)
+        edit_button.clicked.connect(self.edit_profile)
+        delete_button.clicked.connect(self.delete_profile)
+        duplicate_button.clicked.connect(self.duplicate_profile)
+        
+        left_layout.addWidget(self.profiles_list)
+        left_layout.addWidget(buttons_container)
+        
+        # Правая панель с информацией о профиле
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setSpacing(15)
 
-        # Группа основных настроек
-        settings_group = QGroupBox("Настройки профиля")
-        settings_group.setStyleSheet("""
+        # Группа основной информации
+        info_group = QGroupBox("Информация о профиле")
+        info_group.setFont(self.minecraft_font)
+        info_group.setStyleSheet("""
             QGroupBox {
-                background-color: rgba(255, 255, 255, 5);
-                border: 1px solid rgba(255, 255, 255, 30);
-                border-radius: 10px;
                 color: white;
-                font-weight: bold;
+                background-color: rgba(30, 30, 30, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
                 padding: 15px;
-                margin-top: 15px;
+                margin-top: 20px;
+                font-size: 14px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 5px;
+                font-size: 14px;
             }
         """)
-        settings_layout = QFormLayout(settings_group)
-        settings_layout.setSpacing(10)
+        
+        info_layout = QFormLayout(info_group)
+        info_layout.setSpacing(10)
+        
+        self.profile_name_label = QLabel()
+        self.profile_username_label = QLabel()
+        self.profile_version_label = QLabel()
+        self.profile_last_played_label = QLabel()
+        
+        for label in [self.profile_name_label, self.profile_username_label, 
+                     self.profile_version_label, self.profile_last_played_label]:
+            label.setFont(self.minecraft_font)
+            label.setStyleSheet("""
+                color: white;
+                font-size: 14px;
+                background-color: rgba(45, 45, 45, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 5px;
+                padding: 8px;
+            """)
+        
+        info_layout.addRow("Имя профиля:", self.profile_name_label)
+        info_layout.addRow("Никнейм:", self.profile_username_label)
+        info_layout.addRow("Версия:", self.profile_version_label)
+        info_layout.addRow("Последняя игра:", self.profile_last_played_label)
 
-        # Поля настроек
-        name_edit = QLineEdit()
-        version_combo = QComboBox()
-        memory_spin = QSpinBox()
-        java_path_edit = QLineEdit()
-        game_dir_edit = QLineEdit()
-
-        for widget in [name_edit, version_combo, memory_spin, java_path_edit, game_dir_edit]:
-            widget.setStyleSheet("""
-                QLineEdit, QComboBox, QSpinBox {
-                    background-color: rgba(255, 255, 255, 10);
-                    border: 1px solid rgba(255, 255, 255, 30);
+        # Группа настроек Java
+        java_group = QGroupBox("Настройки Java")
+        java_group.setFont(self.minecraft_font)
+        java_group.setStyleSheet(info_group.styleSheet())
+        java_layout = QVBoxLayout(java_group)
+        
+        # Путь к Java
+        java_path_widget = QWidget()
+        java_path_layout = QHBoxLayout(java_path_widget)
+        
+        java_path_label = QLabel("Путь к Java:")
+        java_path_label.setFont(self.minecraft_font)
+        java_path_label.setStyleSheet("color: white; font-size: 14px;")
+        
+        self.java_path_input = QLineEdit()
+        self.java_path_input.setFont(self.minecraft_font)
+        self.java_path_input.setStyleSheet("""
+            QLineEdit {
+                background-color: rgba(45, 45, 45, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
                     border-radius: 5px;
                     color: white;
-                    padding: 5px;
+                padding: 8px;
+                font-size: 14px;
                 }
-                QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+            QLineEdit:focus {
                     border: 1px solid #4CAF50;
                 }
-                QComboBox::drop-down {
-                    border: none;
+        """)
+        
+        browse_java_button = QPushButton("Обзор")
+        browse_java_button.setFont(self.minecraft_font)
+        browse_java_button.setStyleSheet(add_button.styleSheet())
+        browse_java_button.clicked.connect(self.browse_java_path)
+        
+        java_path_layout.addWidget(java_path_label)
+        java_path_layout.addWidget(self.java_path_input)
+        java_path_layout.addWidget(browse_java_button)
+        
+        # Настройки памяти
+        memory_widget = QWidget()
+        memory_layout = QHBoxLayout(memory_widget)
+        
+        memory_min_label = QLabel("Мин. память (МБ):")
+        memory_min_label.setFont(self.minecraft_font)
+        memory_min_label.setStyleSheet("color: white; font-size: 14px;")
+        
+        memory_max_label = QLabel("Макс. память (МБ):")
+        memory_max_label.setFont(self.minecraft_font)
+        memory_max_label.setStyleSheet("color: white; font-size: 14px;")
+        
+        self.min_memory = QSpinBox()
+        self.max_memory = QSpinBox()
+        for spinbox in [self.min_memory, self.max_memory]:
+            spinbox.setFont(self.minecraft_font)
+            spinbox.setMinimum(512)
+            spinbox.setMaximum(32768)
+            spinbox.setSingleStep(512)
+            spinbox.setValue(2048)
+            spinbox.setStyleSheet("""
+                QSpinBox {
+                    background-color: rgba(45, 45, 45, 0.95);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 5px;
+                    color: white;
+                    padding: 8px;
+                    font-size: 14px;
                 }
-                QComboBox::down-arrow {
-                    image: url(Resources/down_arrow.png);
-                    width: 12px;
-                    height: 12px;
+                QSpinBox:focus {
+                    border: 1px solid #4CAF50;
                 }
             """)
 
-        settings_layout.addRow("Имя профиля:", name_edit)
-        settings_layout.addRow("Версия:", version_combo)
-        settings_layout.addRow("Память (MB):", memory_spin)
-        settings_layout.addRow("Путь к Java:", java_path_edit)
-        settings_layout.addRow("Папка игры:", game_dir_edit)
-
-        right_layout.addWidget(settings_group)
-
-        # Группа дополнительных настроек
-        advanced_group = QGroupBox("Дополнительные настройки")
-        advanced_group.setStyleSheet(settings_group.styleSheet())
-        advanced_layout = QVBoxLayout(advanced_group)
-
-        # Чекбоксы для дополнительных настроек
-        checkboxes = [
-            QCheckBox("Открывать лаунчер после закрытия игры"),
-            QCheckBox("Использовать собственные библиотеки"),
-            QCheckBox("Включить экспериментальные функции")
-        ]
-
-        for checkbox in checkboxes:
+        memory_layout.addWidget(memory_min_label)
+        memory_layout.addWidget(self.min_memory)
+        memory_layout.addWidget(memory_max_label)
+        memory_layout.addWidget(self.max_memory)
+        
+        java_layout.addWidget(java_path_widget)
+        java_layout.addWidget(memory_widget)
+        
+        # Дополнительные настройки
+        extra_group = QGroupBox("Дополнительные настройки")
+        extra_group.setFont(self.minecraft_font)
+        extra_group.setStyleSheet(info_group.styleSheet())
+        extra_layout = QVBoxLayout(extra_group)
+        
+        self.close_game_checkbox = QCheckBox("Закрывать лаунчер при запуске игры")
+        self.custom_resolution_checkbox = QCheckBox("Пользовательское разрешение")
+        
+        for checkbox in [self.close_game_checkbox, self.custom_resolution_checkbox]:
+            checkbox.setFont(self.minecraft_font)
             checkbox.setStyleSheet("""
                 QCheckBox {
                     color: white;
-                    spacing: 5px;
+                    font-size: 14px;
                 }
                 QCheckBox::indicator {
-                    width: 18px;
-                    height: 18px;
-                    background-color: rgba(255, 255, 255, 10);
-                    border: 1px solid rgba(255, 255, 255, 30);
+                    width: 20px;
+                    height: 20px;
+                    background-color: rgba(45, 45, 45, 0.95);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
                     border-radius: 3px;
                 }
                 QCheckBox::indicator:checked {
@@ -2567,42 +2958,147 @@ class MinecraftLauncher(QMainWindow):
                     border: 1px solid #4CAF50;
                 }
             """)
-            advanced_layout.addWidget(checkbox)
-
-        right_layout.addWidget(advanced_group)
-
-        # Кнопки сохранения
-        save_buttons = QWidget()
-        save_layout = QHBoxLayout(save_buttons)
-        save_layout.setSpacing(10)
-
-        save_button = QPushButton("Сохранить")
-        cancel_button = QPushButton("Отмена")
-
-        for button in [save_button, cancel_button]:
-            button.setStyleSheet("""
-                QPushButton {
-                    background-color: #4CAF50;
-                    border: none;
-                    border-radius: 5px;
-                    color: white;
-                    padding: 10px 20px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #43A047;
-                }
-                QPushButton:pressed {
-                    background-color: #388E3C;
-                }
-            """)
-            save_layout.addWidget(button)
-
-        right_layout.addWidget(save_buttons)
-        container_layout.addWidget(right_panel)
-
-        layout.addWidget(container)
+        
+        extra_layout.addWidget(self.close_game_checkbox)
+        extra_layout.addWidget(self.custom_resolution_checkbox)
+        
+        # Добавляем все группы на правую панель
+        right_layout.addWidget(info_group)
+        right_layout.addWidget(java_group)
+        right_layout.addWidget(extra_group)
+        right_layout.addStretch()
+        
+        # Добавляем панели в контейнер
+        content_layout.addWidget(left_panel, 1)
+        content_layout.addWidget(right_panel, 2)
+        
+        layout.addWidget(content_widget)
+        
+        # Загружаем профили
+        self.update_profiles_list()
+        
         return page
+
+    def create_sidebar_buttons(self):
+        """Создает и добавляет кнопки в боковую панель"""
+        # Определяем доступные страницы в зависимости от настроек
+        pages = [
+            ("ИГРАТЬ", self.play_page),
+            ("ПРОФИЛИ", self.create_profiles_page()),  # Добавляем новую страницу профилей
+            ("СКИНЫ", self.skins_page),
+            ("НОВОСТИ", self.news_page),
+            ("НАСТРОЙКИ", self.settings_page),
+            ("СООБЩЕСТВО", self.social_page)
+        ]
+        
+        # Добавляем вкладку модов только если включены экспериментальные функции
+        if self.settings.get("experimental_features", False):
+            pages.insert(3, ("МОДЫ", self.mods_page))
+
+        # Очищаем существующие кнопки
+        self.sidebar_buttons.clear()
+        for i in range(self.content_stack.count()):
+            self.content_stack.removeWidget(self.content_stack.widget(0))
+
+        # Получаем layout боковой панели
+        sidebar = self.findChild(QWidget, "sidebar")
+        if not sidebar:
+            return
+        sidebar_layout = sidebar.layout()
+
+        # Добавляем кнопки и страницы
+        for i, (text, page) in enumerate(pages):
+            button = SidebarButton(text, self)
+            button.setObjectName("sidebarButton")
+            button.clicked.connect(lambda checked, index=i: self.change_page(index))
+            
+            # Добавляем кнопку в layout боковой панели перед растяжкой
+            sidebar_layout.insertWidget(sidebar_layout.count() - 2, button)
+            
+            self.sidebar_buttons.append(button)
+            self.content_stack.addWidget(page)
+
+        # Выбираем первую страницу
+        if self.sidebar_buttons:
+            self.sidebar_buttons[0].setChecked(True)
+            self.content_stack.setCurrentIndex(0)
+
+    def update_profiles_list(self):
+        """Обновляет список профилей в окне управления профилями"""
+        self.profiles_list.clear()
+        for profile in self.profiles:
+            item = QListWidgetItem(profile["name"])
+            item.setData(Qt.UserRole, profile)
+            if "icon" in profile and profile["icon"]:
+                icon_path = os.path.join(self.nova_directory, "profile_icons", profile["icon"])
+                if os.path.exists(icon_path):
+                    item.setIcon(QIcon(icon_path))
+            self.profiles_list.addItem(item)
+        
+        # Выбираем первый профиль, если он есть
+        if self.profiles_list.count() > 0:
+            self.profiles_list.setCurrentRow(0)
+            self.update_profile_info()
+
+    def save_profile_settings(self):
+        """Сохраняет настройки текущего профиля"""
+        current_item = self.profiles_list.currentItem()
+        if not current_item:
+            return
+            
+        profile = current_item.data(Qt.UserRole)
+        
+        # Обновляем настройки профиля
+        profile.update({
+            "java_path": self.java_path_input.text(),
+            "min_memory": self.min_memory.value(),
+            "max_memory": self.max_memory.value(),
+            "close_game": self.close_game_checkbox.isChecked(),
+            "custom_resolution": self.custom_resolution_checkbox.isChecked()
+        })
+        
+        # Сохраняем изменения
+        index = self.profiles_list.currentRow()
+        self.profiles[index] = profile
+        self.save_profiles()
+        self.update_profiles_list()
+        self.update_profile_combo()
+        
+        QMessageBox.information(self, "Успешно", "Настройки профиля сохранены")
+
+    def cancel_profile_settings(self):
+        """Отменяет изменения в настройках профиля"""
+        self.update_profile_info()
+
+    def update_profile_info(self):
+        """Обновляет информацию о выбранном профиле"""
+        current_item = self.profiles_list.currentItem()
+        if not current_item:
+            return
+            
+        profile = current_item.data(Qt.UserRole)
+        
+        # Обновляем основную информацию
+        self.profile_name_label.setText(profile["name"])
+        self.profile_username_label.setText(profile["username"])
+        self.profile_version_label.setText(profile.get("last_version", "Не выбрана"))
+        
+        last_played = profile.get("last_played", "Никогда")
+        if last_played != "Никогда":
+            try:
+                last_played = datetime.fromtimestamp(last_played).strftime("%d.%m.%Y %H:%M")
+            except:
+                last_played = "Неизвестно"
+        self.profile_last_played_label.setText(last_played)
+        
+        # Обновляем настройки Java
+        self.java_path_input.setText(profile.get("java_path", ""))
+        self.min_memory.setValue(profile.get("min_memory", 2048))
+        self.max_memory.setValue(profile.get("max_memory", 4096))
+        
+        # Обновляем дополнительные настройки
+        self.close_game_checkbox.setChecked(profile.get("close_game", False))
+        self.custom_resolution_checkbox.setChecked(profile.get("custom_resolution", False))
 
     def create_mods_page(self):
         """Создает страницу управления модами"""
@@ -3115,17 +3611,14 @@ class MinecraftLauncher(QMainWindow):
         advanced_layout = QVBoxLayout(advanced_tab)
         
         # Группа управления лаунчером
-        launcher_group = QWidget()
-        launcher_form = QFormLayout(launcher_group)
+        launcher_group = QGroupBox("Управление лаунчером")
+        launcher_group.setFont(self.minecraft_font)
+        launcher_layout = QVBoxLayout(launcher_group)
         
         # Чекбоксы для настроек
         self.show_tray_checkbox = QCheckBox("Показывать значок в трее")
         self.show_tray_checkbox.setFont(self.minecraft_font)
         self.show_tray_checkbox.setChecked(self.settings.get("show_tray_icon", True))
-        
-        self.minimize_to_tray_checkbox = QCheckBox("Сворачивать в трей при закрытии")
-        self.minimize_to_tray_checkbox.setFont(self.minecraft_font)
-        self.minimize_to_tray_checkbox.setChecked(self.settings.get("minimize_to_tray", True))
         
         self.auto_check_updates_checkbox = QCheckBox("Автоматически проверять обновления")
         self.auto_check_updates_checkbox.setFont(self.minecraft_font)
@@ -3136,11 +3629,6 @@ class MinecraftLauncher(QMainWindow):
         self.experimental_features_checkbox.setFont(self.minecraft_font)
         self.experimental_features_checkbox.setChecked(self.settings.get("experimental_features", False))
         self.experimental_features_checkbox.stateChanged.connect(self.toggle_experimental_features)
-        
-        # Добавляем метку с предупреждением
-        experimental_warning = QLabel("⚠️ Экспериментальные функции могут работать нестабильно")
-        experimental_warning.setFont(self.minecraft_font)
-        experimental_warning.setStyleSheet("color: #FFA500;")  # Оранжевый цвет для предупреждения
         
         # Комбобоксы для дополнительных настроек
         self.auto_update_combo = QComboBox()
@@ -3153,24 +3641,17 @@ class MinecraftLauncher(QMainWindow):
         self.close_launcher_combo.addItems(["Да", "Нет"])
         self.close_launcher_combo.setCurrentText(self.settings.get("close_launcher", "Нет"))
         
-        # Поле для дополнительных аргументов Java
-        self.additional_args_input = QLineEdit()
-        self.additional_args_input.setFont(self.minecraft_font)
-        self.additional_args_input.setText(self.settings.get("additional_arguments", ""))
-        self.additional_args_input.setPlaceholderText("Например: -XX:+UseConcMarkSweepGC")
+        # Добавляем элементы в группу
+        launcher_layout.addWidget(self.show_tray_checkbox)
+        launcher_layout.addWidget(self.auto_check_updates_checkbox)
+        launcher_layout.addWidget(self.experimental_features_checkbox)
         
-        # Добавляем элементы в форму
-        launcher_form.addRow("Обновление Minecraft:", self.auto_update_combo)
-        launcher_form.addRow("Закрывать лаунчер при запуске игры:", self.close_launcher_combo)
+        form_layout = QFormLayout()
+        form_layout.addRow("Обновление Minecraft:", self.auto_update_combo)
+        form_layout.addRow("Закрывать лаунчер при запуске игры:", self.close_launcher_combo)
+        launcher_layout.addLayout(form_layout)
+        
         advanced_layout.addWidget(launcher_group)
-        advanced_layout.addWidget(self.show_tray_checkbox)
-        advanced_layout.addWidget(self.minimize_to_tray_checkbox)
-        advanced_layout.addWidget(self.auto_check_updates_checkbox)
-        advanced_layout.addWidget(self.experimental_features_checkbox)
-        advanced_layout.addWidget(experimental_warning)
-        
-        advanced_layout.addWidget(QLabel("Дополнительные аргументы Java:"))
-        advanced_layout.addWidget(self.additional_args_input)
         advanced_layout.addStretch()
         
         return advanced_tab
@@ -3217,49 +3698,385 @@ class MinecraftLauncher(QMainWindow):
             "Для применения изменений требуется перезапуск лаунчера."
         )
 
-    def create_sidebar_buttons(self):
-        """Создает и добавляет кнопки в боковую панель"""
-        # Определяем доступные страницы в зависимости от настроек
-        pages = [
-            ("ИГРАТЬ", self.play_page),
-            ("СКИНЫ", self.skins_page),
-            ("НОВОСТИ", self.news_page),
-            ("НАСТРОЙКИ", self.settings_page),
-            ("СООБЩЕСТВО", self.social_page)
+    def update_settings_profiles_list(self):
+        """Обновляет список профилей в окне настроек"""
+        if not hasattr(self, 'settings_profiles_list'):
+            return
+            
+        self.settings_profiles_list.clear()
+        for profile in self.profiles:
+            item = QListWidgetItem(profile["name"])
+            item.setData(Qt.UserRole, profile)
+            
+            # Добавляем иконку, если она есть
+            if "icon" in profile and profile["icon"]:
+                icon_path = os.path.join(self.nova_directory, "profile_icons", profile["icon"])
+                if os.path.exists(icon_path):
+                    item.setIcon(QIcon(icon_path))
+            
+            self.settings_profiles_list.addItem(item)
+            
+        # Выбираем первый профиль, если он есть
+        if self.settings_profiles_list.count() > 0:
+            self.settings_profiles_list.setCurrentRow(0)
+            self.update_profile_info()
+
+    def profile_selected(self, current, previous):
+        """Обрабатывает выбор профиля в списке"""
+        if not current:
+            return
+            
+        profile = current.data(Qt.UserRole)
+        if not profile:
+            return
+            
+        # Обновляем основную информацию
+        self.profile_name_label.setText(profile["name"])
+        self.profile_username_label.setText(profile["username"])
+        self.profile_version_label.setText(profile.get("last_version", "Не выбрана"))
+        
+        last_played = profile.get("last_played", "Никогда")
+        if last_played != "Никогда":
+            try:
+                last_played = datetime.fromtimestamp(last_played).strftime("%d.%m.%Y %H:%M")
+            except:
+                last_played = "Неизвестно"
+        self.profile_last_played_label.setText(last_played)
+        
+        # Обновляем настройки Java
+        self.java_path_input.setText(profile.get("java_path", ""))
+        self.min_memory.setValue(profile.get("min_memory", 2048))
+        self.max_memory.setValue(profile.get("max_memory", 4096))
+        
+        # Обновляем дополнительные настройки
+        self.close_game_checkbox.setChecked(profile.get("close_game", False))
+        self.custom_resolution_checkbox.setChecked(profile.get("custom_resolution", False))
+
+    def edit_profile(self):
+        """Редактирует выбранный профиль"""
+        current_item = self.profiles_list.currentItem()
+        if not current_item:
+            return
+            
+        profile = current_item.data(Qt.UserRole)
+        dialog = ProfileDialog(self.parent, profile)
+        if dialog.exec():
+            profile_data = dialog.get_profile_data()
+            # Сохраняем текущие дополнительные настройки
+            profile_data.update({
+                "last_version": profile.get("last_version", ""),
+                "last_played": profile.get("last_played", "Никогда"),
+                "icon": profile.get("icon", "")
+            })
+            index = self.profiles_list.currentRow()
+            self.parent.profiles[index] = profile_data
+            self.parent.save_profiles()
+            self.update_profiles_list()
+            # Восстанавливаем выбор
+            self.profiles_list.setCurrentRow(index)
+            # Обновляем комбобокс профилей
+            self.update_profile_combo()
+
+    def delete_profile(self):
+        """Удаляет выбранный профиль"""
+        current_item = self.profiles_list.currentItem()
+        if not current_item:
+            return
+
+        if len(self.parent.profiles) <= 1:
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Нельзя удалить последний профиль."
+            )
+            return
+            
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение удаления",
+            f"Вы уверены, что хотите удалить профиль {current_item.text()}?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            index = self.profiles_list.currentRow()
+            profile = self.parent.profiles[index]
+            
+            # Удаляем иконку профиля, если она есть
+            if "icon" in profile and profile["icon"]:
+                icon_path = os.path.join(self.parent.nova_directory, "profile_icons", profile["icon"])
+                if os.path.exists(icon_path):
+                    try:
+                        os.remove(icon_path)
+                    except Exception as e:
+                        pass
+            
+            del self.parent.profiles[index]
+            self.parent.save_profiles()
+            self.load_profiles()
+            # Обновляем комбобокс профилей
+            self.update_profile_combo()
+
+    def duplicate_profile(self):
+        """Создает копию выбранного профиля"""
+        current_item = self.profiles_list.currentItem()
+        if not current_item:
+            return
+            
+        profile = current_item.data(Qt.UserRole).copy()
+        profile["name"] = f"{profile['name']} (копия)"
+        
+        # Генерируем новый UUID для иконки, если она есть
+        if "icon" in profile and profile["icon"]:
+            old_icon = profile["icon"]
+            new_icon = f"icon_{uuid.uuid4()}{os.path.splitext(old_icon)[1]}"
+            old_path = os.path.join(self.parent.nova_directory, "profile_icons", old_icon)
+            new_path = os.path.join(self.parent.nova_directory, "profile_icons", new_icon)
+            
+            if os.path.exists(old_path):
+                import shutil
+                shutil.copy2(old_path, new_path)
+                profile["icon"] = new_icon
+        
+        self.parent.profiles.append(profile)
+        self.parent.save_profiles()
+        self.load_profiles()
+        # Выбираем новый профиль
+        self.profiles_list.setCurrentRow(len(self.parent.profiles) - 1)
+        # Обновляем комбобокс профилей
+        self.update_profile_combo()
+
+    def check_minecraft_files(self, version):
+        """Проверяет наличие и целостность файлов Minecraft"""
+        try:
+            # Проверяем основные директории
+            version_dir = os.path.join(self.minecraft_directory, "versions", version)
+            jar_file = os.path.join(version_dir, f"{version}.jar")
+            json_file = os.path.join(version_dir, f"{version}.json")
+            
+            if not os.path.exists(version_dir):
+                return False, "Версия не установлена"
+                
+            if not os.path.exists(jar_file):
+                return False, "Файл игры поврежден"
+                
+            if not os.path.exists(json_file):
+                return False, "Файл конфигурации поврежден"
+            
+            # Проверяем наличие библиотек
+            try:
+                with open(json_file, 'r') as f:
+                    version_data = json.load(f)
+                    libraries = version_data.get('libraries', [])
+                    
+                    for lib in libraries:
+                        if 'downloads' in lib and 'artifact' in lib['downloads']:
+                            lib_path = os.path.join(
+                                self.minecraft_directory,
+                                "libraries",
+                                lib['downloads']['artifact']['path']
+                            )
+                            if not os.path.exists(lib_path):
+                                return False, "Отсутствуют необходимые библиотеки"
+            except Exception:
+                return False, "Ошибка проверки библиотек"
+            
+            # Проверяем наличие assets
+            assets_dir = os.path.join(self.minecraft_directory, "assets")
+            if not os.path.exists(assets_dir):
+                return False, "Отсутствуют игровые ресурсы"
+            
+            return True, "Версия готова к запуску"
+            
+        except Exception as e:
+            return False, f"Ошибка проверки файлов: {str(e)}"
+
+    def repair_minecraft_version(self, version):
+        """Восстанавливает поврежденную версию Minecraft"""
+        try:
+            # Создаем улучшенный прогресс-бар для установки
+            self.progress_bar.setVisible(True)
+            self.progress_label.setVisible(True)
+            self.progress_label.setText("Подготовка к восстановлению...")
+            self.progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: none;
+                    background: rgba(0, 0, 0, 0.2);
+                    border-radius: 3px;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #43A047,
+                        stop:0.2 #66BB6A,
+                        stop:0.4 #81C784,
+                        stop:0.6 #A5D6A7,
+                        stop:0.8 #C8E6C9,
+                        stop:1 #43A047);
+                    border-radius: 3px;
+                }
+            """)
+            
+            # Запускаем установку в отдельном потоке с флагом восстановления
+            self.installer = MinecraftVersionInstaller(version, self.minecraft_directory, is_repair=True)
+            self.installer.progress.connect(self.update_repair_progress)
+            self.installer.finished.connect(lambda: self.finish_repair(version))
+            self.installer.error.connect(self.show_repair_error)
+            self.installer.start()
+            
+            return True
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось начать восстановление: {str(e)}"
+            )
+            return False
+
+    def update_repair_progress(self, value: int, status: str):
+        """Обновляет прогресс восстановления версии"""
+        if not self.progress_bar.isVisible():
+            self.progress_bar.setVisible(True)
+            self.progress_label.setVisible(True)
+        
+        if value == -1:
+            self.progress_label.setText(f"Восстановление: {status}")
+            self.progress_bar.setMaximum(0)
+        else:
+            self.progress_bar.setMaximum(100)
+            self.progress_bar.setValueSmooth(value)
+            if status:
+                self.progress_label.setText(f"Восстановление: {status}")
+
+    def finish_repair(self, version):
+        """Завершает процесс восстановления версии"""
+        self.progress_bar.setVisible(False)
+        self.progress_label.setVisible(False)
+        
+        success, message = self.check_minecraft_files(version)
+        if success:
+            QMessageBox.information(
+                self,
+                "Восстановление завершено",
+                f"Версия {version} успешно восстановлена"
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                f"Восстановление может быть неполным: {message}"
+            )
+
+    def show_repair_error(self, error: str):
+        """Показывает ошибку восстановления"""
+        QMessageBox.critical(
+            self,
+            "Ошибка восстановления",
+            f"Не удалось восстановить версию: {error}"
+        )
+        self.progress_bar.setVisible(False)
+        self.progress_label.setVisible(False)
+
+    def launch_minecraft(self):
+        """Запускает Minecraft с проверкой файлов"""
+        selected_version = self.version_combo.currentText()
+        if not selected_version:
+            QMessageBox.warning(self, "Внимание", "Выберите версию для запуска")
+            return
+            
+        # Проверяем файлы версии
+        success, message = self.check_minecraft_files(selected_version)
+        if not success:
+            reply = QMessageBox.question(
+                self,
+                "Проблема с версией",
+                f"{message}. Хотите попробовать восстановить версию?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                if self.repair_minecraft_version(selected_version):
+                    return  # Выходим, т.к. запуск произойдет после восстановления
+                else:
+                    return  # Выходим, если не удалось начать восстановление
+            else:
+                return
+        
+        # Продолжаем запуск, если все файлы в порядке
+        current_profile = self.profiles[self.profile_combo.currentIndex()]
+        username = current_profile["username"]
+        
+        min_memory = self.settings.get("min_memory", 2048)
+        max_memory = self.settings.get("max_memory", 4096)
+        
+        # Генерация UUID на основе имени пользователя
+        player_uuid = str(uuid.uuid3(uuid.NAMESPACE_OID, username))
+        
+        # Базовые JVM аргументы
+        jvm_arguments = [
+            f"-Xms{min_memory}M",
+            f"-Xmx{max_memory}M"
         ]
         
-        # Добавляем вкладку модов только если включены экспериментальные функции
-        if self.settings.get("experimental_features", False):
-            pages.insert(2, ("МОДЫ", self.mods_page))
+        # Добавляем дополнительные аргументы, если они указаны
+        additional_args = self.settings.get("additional_arguments", "")
+        if additional_args:
+            jvm_arguments.extend(additional_args.split())
+        
+        options = {
+            "username": username,
+            "uuid": player_uuid,
+            "token": "",
+            "jvmArguments": jvm_arguments,
+            "customResolution": False
+        }
+        
+        # Если указан пользовательский путь к Java, добавляем его в опции
+        java_path = self.settings.get("java_path", "")
+        if java_path and os.path.exists(java_path):
+            options["javaPath"] = java_path
 
-        # Очищаем существующие кнопки
-        self.sidebar_buttons.clear()
-        for i in range(self.content_stack.count()):
-            self.content_stack.removeWidget(self.content_stack.widget(0))
-
-        # Получаем layout боковой панели
-        sidebar = self.findChild(QWidget, "sidebar")
-        if not sidebar:
-            return
-        sidebar_layout = sidebar.layout()
-
-        # Добавляем кнопки и страницы
-        for i, (text, page) in enumerate(pages):
-            button = SidebarButton(text, self)
-            button.setObjectName("sidebarButton")
-            button.clicked.connect(lambda checked, index=i: self.change_page(index))
+        try:
+            # Используем директорию для игры из настроек
+            minecraft_directory = self.settings.get("download_location", self.minecraft_directory)
             
-            # Добавляем кнопку в layout боковой панели перед растяжкой
-            # (предпоследний элемент, так как последний - это версия лаунчера)
-            sidebar_layout.insertWidget(sidebar_layout.count() - 2, button)
-            
-            self.sidebar_buttons.append(button)
-            self.content_stack.addWidget(page)
+            # Получаем команду для запуска
+            minecraft_command = minecraft_launcher_lib.command.get_minecraft_command(
+                selected_version,
+                minecraft_directory,
+                options
+            )
 
-        # Выбираем первую страницу
-        if self.sidebar_buttons:
-            self.sidebar_buttons[0].setChecked(True)
-            self.content_stack.setCurrentIndex(0)
+            # Запускаем Minecraft в отдельном процессе
+            process = subprocess.Popen(minecraft_command)
+            
+            # Сохраняем PID процесса для возможного отслеживания
+            self.minecraft_process_pid = process.pid
+            
+            # Показываем уведомление в трее, если включен
+            if hasattr(self, "tray_icon") and self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    "Minecraft запущен",
+                    f"Minecraft {selected_version} запущен успешно",
+                    QSystemTrayIcon.Information,
+                    2000
+                )
+            
+            # Обновляем информацию о последнем запуске в профиле
+            current_profile["last_version"] = selected_version
+            current_profile["last_played"] = time.time()
+            self.save_profiles()
+            
+            # Закрыть лаунчер, если выбрано в настройках
+            if self.settings.get("close_launcher", "Нет") == "Да":
+                self.close()
+                
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Ошибка",
+                f"Не удалось запустить Minecraft: {str(e)}"
+            )
 
 class MinecraftNewsThread(QThread):
     news_loaded = Signal(list)
@@ -3511,133 +4328,469 @@ class ProfileManagerDialog(QDialog):
         super().__init__(parent)
         self.parent = parent
         self.setWindowTitle("Управление профилями")
-        self.setMinimumSize(600, 400)
+        self.setMinimumSize(1000, 900)
         
-        layout = QVBoxLayout(self)
+        # Основной layout с отступами
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(20)
         
-        # Список профилей
+        # Заголовок
+        title_label = QLabel("Управление профилями")
+        title_label.setFont(QFont(parent.minecraft_font.family(), 24))
+        title_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                padding: 10px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #43A047,
+                    stop:0.5 #4CAF50,
+                    stop:1 #43A047);
+                border-radius: 10px;
+            }
+        """)
+        main_layout.addWidget(title_label)
+        
+        # Контейнер для основного содержимого
+        content_widget = QWidget()
+        content_layout = QHBoxLayout(content_widget)
+        content_layout.setSpacing(20)
+        
+        # Левая панель со списком профилей
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setSpacing(10)
+        
+        # Список профилей с улучшенным стилем
         self.profiles_list = QListWidget()
         self.profiles_list.setFont(parent.minecraft_font)
+        self.profiles_list.setStyleSheet("""
+            QListWidget {
+                background-color: rgba(30, 30, 30, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+                padding: 5px;
+            }
+            QListWidget::item {
+                color: white;
+                background-color: rgba(45, 45, 45, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 5px;
+                padding: 10px;
+                margin: 2px;
+            }
+            QListWidget::item:selected {
+                background-color: rgba(76, 175, 80, 0.3);
+                border: 1px solid #4CAF50;
+            }
+            QListWidget::item:hover {
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+        """)
         self.profiles_list.currentItemChanged.connect(self.profile_selected)
-        layout.addWidget(self.profiles_list)
         
-        # Кнопки управления
-        buttons_layout = QHBoxLayout()
+        # Кнопки управления профилями
+        buttons_widget = QWidget()
+        buttons_layout = QHBoxLayout(buttons_widget)
+        buttons_layout.setSpacing(10)
         
         add_button = QPushButton("Добавить")
-        add_button.setFont(parent.minecraft_font)
-        add_button.clicked.connect(self.add_profile)
-        
         edit_button = QPushButton("Редактировать")
-        edit_button.setFont(parent.minecraft_font)
-        edit_button.clicked.connect(self.edit_profile)
-        
         delete_button = QPushButton("Удалить")
-        delete_button.setFont(parent.minecraft_font)
+        duplicate_button = QPushButton("Дублировать")  # Новая кнопка
+        
+        for button in [add_button, edit_button, delete_button, duplicate_button]:
+            button.setFont(parent.minecraft_font)
+            button.setMinimumHeight(40)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(45, 45, 45, 0.95);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 5px;
+                    color: white;
+                    padding: 8px 15px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(76, 175, 80, 0.3);
+                    border: 1px solid #4CAF50;
+                }
+                QPushButton:pressed {
+                    background-color: rgba(76, 175, 80, 0.5);
+                }
+            """)
+            buttons_layout.addWidget(button)
+        
+        add_button.clicked.connect(self.add_profile)
+        edit_button.clicked.connect(self.edit_profile)
         delete_button.clicked.connect(self.delete_profile)
+        duplicate_button.clicked.connect(self.duplicate_profile)  # Новый метод
         
-        buttons_layout.addWidget(add_button)
-        buttons_layout.addWidget(edit_button)
-        buttons_layout.addWidget(delete_button)
-        layout.addLayout(buttons_layout)
+        left_layout.addWidget(self.profiles_list)
+        left_layout.addWidget(buttons_widget)
         
-        # Информация о профиле
-        info_group = QWidget()
+        # Правая панель с информацией о профиле
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setSpacing(15)
+        
+        # Группа основной информации
+        info_group = QGroupBox("Информация о профиле")
+        info_group.setFont(parent.minecraft_font)
+        info_group.setStyleSheet("""
+            QGroupBox {
+                color: white;
+                background-color: rgba(30, 30, 30, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+                padding: 15px;
+                margin-top: 20px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+        
         info_layout = QFormLayout(info_group)
+        info_layout.setSpacing(10)
         
         self.name_label = QLabel()
-        self.name_label.setFont(parent.minecraft_font)
         self.username_label = QLabel()
-        self.username_label.setFont(parent.minecraft_font)
+        self.version_label = QLabel()  # Новое поле
+        self.last_played_label = QLabel()  # Новое поле
+        
+        for label in [self.name_label, self.username_label, self.version_label, self.last_played_label]:
+            label.setFont(parent.minecraft_font)
+            label.setStyleSheet("color: white;")
         
         info_layout.addRow("Имя профиля:", self.name_label)
         info_layout.addRow("Никнейм:", self.username_label)
+        info_layout.addRow("Версия:", self.version_label)
+        info_layout.addRow("Последняя игра:", self.last_played_label)
         
-        layout.addWidget(info_group)
+        # Группа настроек профиля
+        settings_group = QGroupBox("Настройки профиля")
+        settings_group.setFont(parent.minecraft_font)
+        settings_group.setStyleSheet(info_group.styleSheet())
+        settings_layout = QVBoxLayout(settings_group)
         
-        # Кнопка выбора иконки
-        self.icon_button = QPushButton("Выбрать иконку")
-        self.icon_button.setFont(parent.minecraft_font)
-        self.icon_button.clicked.connect(self.choose_icon)
-        layout.addWidget(self.icon_button)
+        # Настройки Java
+        java_widget = QWidget()
+        java_layout = QHBoxLayout(java_widget)
         
-        # Предпросмотр иконки
-        self.icon_preview = QLabel()
-        self.icon_preview.setFixedSize(64, 64)
-        self.icon_preview.setAlignment(Qt.AlignCenter)
-        self.icon_preview.setStyleSheet("background-color: rgba(45, 45, 45, 180); border-radius: 4px;")
-        layout.addWidget(self.icon_preview)
+        self.java_path_input = QLineEdit()
+        self.java_path_input.setFont(parent.minecraft_font)
+        self.java_path_input.setStyleSheet("""
+            QLineEdit {
+                background-color: rgba(45, 45, 45, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 5px;
+                color: white;
+                padding: 8px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #4CAF50;
+            }
+        """)
+        
+        browse_java_button = QPushButton("Обзор")
+        browse_java_button.setFont(parent.minecraft_font)
+        browse_java_button.setStyleSheet(add_button.styleSheet())
+        browse_java_button.clicked.connect(self.browse_java_path)
+        
+        java_layout.addWidget(QLabel("Путь к Java:"))
+        java_layout.addWidget(self.java_path_input)
+        java_layout.addWidget(browse_java_button)
+        
+        # Настройки памяти
+        memory_widget = QWidget()
+        memory_layout = QHBoxLayout(memory_widget)
+        
+        self.min_memory = QSpinBox()
+        self.max_memory = QSpinBox()
+        for spinbox in [self.min_memory, self.max_memory]:
+            spinbox.setFont(parent.minecraft_font)
+            spinbox.setMinimum(512)
+            spinbox.setMaximum(32768)
+            spinbox.setSingleStep(512)
+            spinbox.setValue(2048)
+            spinbox.setStyleSheet("""
+                QSpinBox {
+                    background-color: rgba(45, 45, 45, 0.95);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 5px;
+                    color: white;
+                    padding: 8px;
+                }
+                QSpinBox:focus {
+                    border: 1px solid #4CAF50;
+                }
+            """)
+        
+        memory_layout.addWidget(QLabel("Мин. память (МБ):"))
+        memory_layout.addWidget(self.min_memory)
+        memory_layout.addWidget(QLabel("Макс. память (МБ):"))
+        memory_layout.addWidget(self.max_memory)
+        
+        settings_layout.addWidget(java_widget)
+        settings_layout.addWidget(memory_widget)
+        
+        # Дополнительные настройки
+        extra_group = QGroupBox("Дополнительные настройки")
+        extra_group.setFont(parent.minecraft_font)
+        extra_group.setStyleSheet(info_group.styleSheet())
+        extra_layout = QVBoxLayout(extra_group)
+        
+        self.close_game_checkbox = QCheckBox("Закрывать лаунчер при запуске игры")
+        self.custom_resolution_checkbox = QCheckBox("Пользовательское разрешение")
+        
+        for checkbox in [self.close_game_checkbox, self.custom_resolution_checkbox]:
+            checkbox.setFont(parent.minecraft_font)
+            checkbox.setStyleSheet("""
+                QCheckBox {
+                    color: white;
+                }
+                QCheckBox::indicator {
+                    width: 20px;
+                    height: 20px;
+                    background-color: rgba(45, 45, 45, 0.95);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 3px;
+                }
+                QCheckBox::indicator:checked {
+                    background-color: #4CAF50;
+                    border: 1px solid #43A047;
+                }
+                QCheckBox::indicator:hover {
+                    border: 1px solid #4CAF50;
+                }
+            """)
+        
+        extra_layout.addWidget(self.close_game_checkbox)
+        extra_layout.addWidget(self.custom_resolution_checkbox)
+        
+        # Добавляем все группы на правую панель
+        right_layout.addWidget(info_group)
+        right_layout.addWidget(settings_group)
+        right_layout.addWidget(extra_group)
+        right_layout.addStretch()
+        
+        # Добавляем панели в контейнер
+        content_layout.addWidget(left_panel, 1)
+        content_layout.addWidget(right_panel, 2)
+        
+        main_layout.addWidget(content_widget)
         
         # Кнопки закрытия
-        close_buttons = QHBoxLayout()
+        buttons_container = QWidget()
+        buttons_container_layout = QHBoxLayout(buttons_container)
+        buttons_container_layout.setSpacing(10)
+        
         save_button = QPushButton("Сохранить")
-        save_button.setFont(parent.minecraft_font)
-        save_button.clicked.connect(self.accept)
         cancel_button = QPushButton("Отмена")
-        cancel_button.setFont(parent.minecraft_font)
+        
+        for button in [save_button, cancel_button]:
+            button.setFont(parent.minecraft_font)
+            button.setMinimumHeight(40)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setStyleSheet("""
+                QPushButton {
+                    background-color: #4CAF50;
+                    border: none;
+                    border-radius: 5px;
+                    color: white;
+                    padding: 8px 30px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #43A047;
+                }
+                QPushButton:pressed {
+                    background-color: #388E3C;
+                }
+            """)
+        
+        cancel_button.setStyleSheet(cancel_button.styleSheet().replace("#4CAF50", "#F44336")
+                                                           .replace("#43A047", "#E53935")
+                                                           .replace("#388E3C", "#D32F2F"))
+        
+        save_button.clicked.connect(self.accept)
         cancel_button.clicked.connect(self.reject)
         
-        close_buttons.addWidget(save_button)
-        close_buttons.addWidget(cancel_button)
-        layout.addLayout(close_buttons)
+        buttons_container_layout.addStretch()
+        buttons_container_layout.addWidget(save_button)
+        buttons_container_layout.addWidget(cancel_button)
+        
+        main_layout.addWidget(buttons_container)
         
         # Загружаем профили
         self.load_profiles()
         
+    def browse_java_path(self):
+        """Выбор пути к Java"""
+        file_filter = "Java Executable (javaw.exe)" if sys.platform == "win32" else "Java Executable (java)"
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите исполняемый файл Java",
+            "",
+            file_filter
+        )
+        if file_path:
+            self.java_path_input.setText(file_path)
+            
+    def duplicate_profile(self):
+        """Создает копию выбранного профиля"""
+        current_item = self.profiles_list.currentItem()
+        if not current_item:
+            return
+            
+        profile = current_item.data(Qt.UserRole).copy()
+        profile["name"] = f"{profile['name']} (копия)"
+        
+        # Генерируем новый UUID для иконки, если она есть
+        if "icon" in profile and profile["icon"]:
+            old_icon = profile["icon"]
+            new_icon = f"icon_{uuid.uuid4()}{os.path.splitext(old_icon)[1]}"
+            old_path = os.path.join(self.parent.nova_directory, "profile_icons", old_icon)
+            new_path = os.path.join(self.parent.nova_directory, "profile_icons", new_icon)
+            
+            if os.path.exists(old_path):
+                import shutil
+                shutil.copy2(old_path, new_path)
+                profile["icon"] = new_icon
+        
+        self.parent.profiles.append(profile)
+        self.parent.save_profiles()
+        self.load_profiles()
+        
+        # Выбираем новый профиль
+        self.profiles_list.setCurrentRow(self.profiles_list.count() - 1)
+        
     def load_profiles(self):
+        """Загружает список профилей"""
         self.profiles_list.clear()
         for profile in self.parent.profiles:
             item = QListWidgetItem(profile["name"])
             item.setData(Qt.UserRole, profile)
+            
+            # Добавляем иконку, если она есть
+            if "icon" in profile and profile["icon"]:
+                icon_path = os.path.join(self.parent.nova_directory, "profile_icons", profile["icon"])
+                if os.path.exists(icon_path):
+                    item.setIcon(QIcon(icon_path))
+            
             self.profiles_list.addItem(item)
             
     def profile_selected(self, current, previous):
-        if current is None:
-            self.name_label.setText("")
-            self.username_label.setText("")
-            self.icon_preview.clear()
+        """Обрабатывает выбор профиля"""
+        if not current:
+            self.clear_profile_info()
             return
             
         profile = current.data(Qt.UserRole)
+        
+        # Обновляем основную информацию
         self.name_label.setText(profile["name"])
         self.username_label.setText(profile["username"])
         
-        # Отображаем иконку профиля
-        if "icon" in profile and profile["icon"]:
-            icon_path = os.path.join(self.parent.nova_directory, "profile_icons", profile["icon"])
-            if os.path.exists(icon_path):
-                pixmap = QPixmap(icon_path)
-                self.icon_preview.setPixmap(pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            else:
-                self.icon_preview.clear()
-        else:
-            self.icon_preview.clear()
+        # Обновляем дополнительную информацию
+        self.version_label.setText(profile.get("last_version", "Не выбрана"))
+        last_played = profile.get("last_played", "Никогда")
+        if last_played != "Никогда":
+            try:
+                last_played = datetime.fromtimestamp(last_played).strftime("%d.%m.%Y %H:%M")
+            except:
+                last_played = "Неизвестно"
+        self.last_played_label.setText(last_played)
+        
+        # Обновляем настройки Java
+        self.java_path_input.setText(profile.get("java_path", ""))
+        
+        # Обновляем настройки памяти
+        self.min_memory.setValue(profile.get("min_memory", 2048))
+        self.max_memory.setValue(profile.get("max_memory", 4096))
+        
+        # Обновляем дополнительные настройки
+        self.close_game_checkbox.setChecked(profile.get("close_game", False))
+        self.custom_resolution_checkbox.setChecked(profile.get("custom_resolution", False))
+        
+    def clear_profile_info(self):
+        """Очищает информацию о профиле"""
+        self.name_label.setText("")
+        self.username_label.setText("")
+        self.version_label.setText("")
+        self.last_played_label.setText("")
+        self.java_path_input.setText("")
+        self.min_memory.setValue(2048)
+        self.max_memory.setValue(4096)
+        self.close_game_checkbox.setChecked(False)
+        self.custom_resolution_checkbox.setChecked(False)
             
     def add_profile(self):
+        """Добавляет новый профиль"""
         dialog = ProfileDialog(self.parent)
         if dialog.exec():
             profile_data = dialog.get_profile_data()
+            # Добавляем дополнительные настройки
+            profile_data.update({
+                "java_path": "",
+                "min_memory": 2048,
+                "max_memory": 4096,
+                "close_game": False,
+                "custom_resolution": False,
+                "last_version": "",
+                "last_played": "Никогда"
+            })
             self.parent.profiles.append(profile_data)
             self.parent.save_profiles()
             self.load_profiles()
+            # Выбираем новый профиль
+            self.profiles_list.setCurrentRow(self.profiles_list.count() - 1)
             
     def edit_profile(self):
+        """Редактирует выбранный профиль"""
         current_item = self.profiles_list.currentItem()
-        if current_item is None:
+        if not current_item:
             return
             
         profile = current_item.data(Qt.UserRole)
         dialog = ProfileDialog(self.parent, profile)
         if dialog.exec():
             profile_data = dialog.get_profile_data()
+            # Сохраняем текущие дополнительные настройки
+            profile_data.update({
+                "java_path": self.java_path_input.text(),
+                "min_memory": self.min_memory.value(),
+                "max_memory": self.max_memory.value(),
+                "close_game": self.close_game_checkbox.isChecked(),
+                "custom_resolution": self.custom_resolution_checkbox.isChecked(),
+                "last_version": profile.get("last_version", ""),
+                "last_played": profile.get("last_played", "Никогда"),
+                "icon": profile.get("icon", "")
+            })
             index = self.profiles_list.currentRow()
             self.parent.profiles[index] = profile_data
             self.parent.save_profiles()
             self.load_profiles()
+            # Восстанавливаем выбор
+            self.profiles_list.setCurrentRow(index)
+            # Обновляем комбобокс профилей
+            self.update_profile_combo()
             
     def delete_profile(self):
+        """Удаляет выбранный профиль"""
         current_item = self.profiles_list.currentItem()
-        if current_item is None:
+        if not current_item:
+            return
+
+        if len(self.parent.profiles) <= 1:
+            QMessageBox.warning(
+                self,
+                "Предупреждение",
+                "Нельзя удалить последний профиль."
+            )
             return
             
         reply = QMessageBox.question(
@@ -3649,63 +4802,27 @@ class ProfileManagerDialog(QDialog):
         
         if reply == QMessageBox.Yes:
             index = self.profiles_list.currentRow()
-            # Удаляем иконку профиля, если она есть
             profile = self.parent.profiles[index]
+            
+            # Удаляем иконку профиля, если она есть
             if "icon" in profile and profile["icon"]:
                 icon_path = os.path.join(self.parent.nova_directory, "profile_icons", profile["icon"])
                 if os.path.exists(icon_path):
-                    os.remove(icon_path)
+                    try:
+                        os.remove(icon_path)
+                    except Exception as e:
+                        pass
             
             del self.parent.profiles[index]
             self.parent.save_profiles()
             self.load_profiles()
-            
-    def choose_icon(self):
-        current_item = self.profiles_list.currentItem()
-        if current_item is None:
-            return
-            
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Выберите иконку профиля",
-            "",
-            "Изображения (*.png *.jpg *.jpeg)"
-        )
-        
-        if file_path:
-            try:
-                # Создаем директорию для иконок, если её нет
-                icons_dir = os.path.join(self.parent.nova_directory, "profile_icons")
-                if not os.path.exists(icons_dir):
-                    os.makedirs(icons_dir)
-                
-                # Генерируем уникальное имя файла
-                file_ext = os.path.splitext(file_path)[1]
-                new_filename = f"icon_{uuid.uuid4()}{file_ext}"
-                new_path = os.path.join(icons_dir, new_filename)
-                
-                # Копируем файл
-                import shutil
-                shutil.copy2(file_path, new_path)
-                
-                # Обновляем профиль
-                index = self.profiles_list.currentRow()
-                self.parent.profiles[index]["icon"] = new_filename
-                self.parent.save_profiles()
-                
-                # Обновляем предпросмотр
-                pixmap = QPixmap(new_path)
-                self.icon_preview.setPixmap(pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Не удалось установить иконку: {str(e)}")
 
 class SmoothStackedWidget(QStackedWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.m_direction = Qt.Horizontal
-        self.m_speed = 800
-        self.m_animationtype = QEasingCurve.OutExpo
+        self.m_speed = 500  # Уменьшаем скорость для большей плавности
+        self.m_animationtype = QEasingCurve.OutExpo  # Меняем тип анимации
         self.m_now = 0
         self.m_next = 0
         self.m_wrap = False
@@ -3714,9 +4831,9 @@ class SmoothStackedWidget(QStackedWidget):
 
         # Создаем слои для эффекта размытия движения
         self.motion_layers = []
-        for i in range(3):
+        for i in range(5):  # Увеличиваем количество слоев
             layer = QWidget(self)
-            layer.setStyleSheet(f"background-color: rgba(0, 0, 0, {0.1 * (i + 1)});")
+            layer.setStyleSheet(f"background-color: rgba(0, 0, 0, {0.08 * (i + 1)});")
             layer.hide()
             self.motion_layers.append(layer)
             
@@ -3724,25 +4841,31 @@ class SmoothStackedWidget(QStackedWidget):
         self.anim_group = None
 
     def setSpeed(self, speed):
+        """Устанавливает скорость анимации"""
         self.m_speed = speed
 
     def setAnimation(self, animationtype):
+        """Устанавливает тип анимации"""
         self.m_animationtype = animationtype
 
     def setWrap(self, wrap):
+        """Устанавливает режим цикличного переключения"""
         self.m_wrap = wrap
 
     def slideInNext(self):
+        """Переход к следующей странице"""
         now = self.currentIndex()
         if self.m_wrap or now < self.count() - 1:
             self.slideInIdx(now + 1)
 
     def slideInPrev(self):
+        """Переход к предыдущей странице"""
         now = self.currentIndex()
         if self.m_wrap or now > 0:
             self.slideInIdx(now - 1)
 
     def slideInIdx(self, idx):
+        """Переход к странице по индексу"""
         if self.m_active:
             return
             
@@ -3797,18 +4920,18 @@ class SmoothStackedWidget(QStackedWidget):
         self.widget(_next).show()
         self.widget(_next).raise_()
 
-        # Настраиваем слои для эффекта размытия
+        # Настраиваем слои для улучшенного эффекта размытия
         for i, layer in enumerate(self.motion_layers):
             layer.setGeometry(self.rect())
             layer.show()
             layer.raise_()
             
-            # Устанавливаем начальные позиции слоев с небольшим смещением
-            offset_factor = 0.2 * (i + 1)
+            # Улучшенное смещение слоев
+            offset_factor = 0.15 * (i + 1)  # Уменьшаем смещение для большей плавности
             layer_offset = QPoint(int(offsetx * offset_factor), int(offsety * offset_factor))
             layer.move(pnow + layer_offset)
 
-        # Очищаем предыдущую группу анимаций, если она существует
+        # Очищаем предыдущую группу анимаций
         if self.anim_group is not None:
             self.anim_group.stop()
             self.anim_group.deleteLater()
@@ -3816,7 +4939,7 @@ class SmoothStackedWidget(QStackedWidget):
         # Создаем новую группу анимаций
         self.anim_group = QParallelAnimationGroup(self)
 
-        # Анимации для основных виджетов
+        # Анимации для основных виджетов с улучшенными параметрами
         for index, start, end in zip((_now, _next), (pnow, pnext - offset), (pnow + offset, pnext)):
             animation = QPropertyAnimation(self.widget(index), b"pos", self)
             animation.setDuration(self.m_speed)
@@ -3825,14 +4948,14 @@ class SmoothStackedWidget(QStackedWidget):
             animation.setEndValue(end)
             self.anim_group.addAnimation(animation)
 
-        # Анимации для слоев размытия
+        # Улучшенные анимации для слоев размытия
         for i, layer in enumerate(self.motion_layers):
-            delay_factor = 0.15 * (i + 1)
+            delay_factor = 0.12 * (i + 1)  # Уменьшаем задержку
             layer_anim = QPropertyAnimation(layer, b"pos", self)
             layer_anim.setStartValue(pnow)
             layer_anim.setEndValue(pnow + offset)
             layer_anim.setDuration(int(self.m_speed * (1 + delay_factor)))
-            layer_anim.setEasingCurve(self.m_animationtype)
+            layer_anim.setEasingCurve(QEasingCurve.OutExpo)  # Используем OutExpo для слоев
             self.anim_group.addAnimation(layer_anim)
 
         self.anim_group.finished.connect(self.animationDoneSlot)
@@ -3855,40 +4978,136 @@ class SmoothStackedWidget(QStackedWidget):
             self.anim_group.deleteLater()
             self.anim_group = None
 
-class SimpleProgressBar(QProgressBar):
+class BeautifulProgressBar(QProgressBar):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(4)
         self.setTextVisible(False)
-        self.setValue(0)
         
-        # Устанавливаем стиль прогресс-бара с градиентом
+        # Эффект свечения
+        glow = QGraphicsDropShadowEffect(self)
+        glow.setBlurRadius(15)
+        glow.setColor(QColor(255, 20, 147, 150))  # Розовое свечение
+        glow.setOffset(0, 0)
+        self.setGraphicsEffect(glow)
+        
+        # Улучшенный стиль с градиентом
         self.setStyleSheet("""
             QProgressBar {
                 border: none;
-                background: rgba(255, 255, 255, 0.08);
+                background: rgba(255, 255, 255, 0.1);
                 border-radius: 2px;
             }
             QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                    stop:0 #43A047, 
-                    stop:0.5 #4CAF50, 
-                    stop:1 #66BB6A);
                 border-radius: 2px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                    stop:0 #FF1493,
+                    stop:0.3 #FFD700,
+                    stop:0.6 #FF69B4,
+                    stop:1 #FFD700
+                );
             }
         """)
         
-        # Создаем анимацию для плавного увеличения значения
-        self.animation = QPropertyAnimation(self, b"value")
-        self.animation.setEasingCurve(QEasingCurve.OutCubic)
+        # Анимация значения
+        self.value_animation = QPropertyAnimation(self, b"value")
+        self.value_animation.setEasingCurve(QEasingCurve.OutExpo)
+        self.value_animation.setDuration(800)
         
-    def setValueSmooth(self, value, duration=500):
-        """Плавно устанавливает значение прогресс-бара с указанной длительностью"""
-        self.animation.stop()
-        self.animation.setStartValue(self.value())
-        self.animation.setEndValue(value)
-        self.animation.setDuration(duration)
-        self.animation.start()
+        # Анимация градиента
+        self.gradient_animation = QPropertyAnimation(self, b"styleSheet")
+        self.gradient_animation.setDuration(1500)
+        self.gradient_animation.setLoopCount(-1)
+        
+        gradient_keyframes = [
+            (0.0, """
+                QProgressBar {
+                    border: none;
+                    background: rgba(255, 255, 255, 0.1);
+                border-radius: 2px;
+            }
+                QProgressBar::chunk {
+                    border-radius: 2px;
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #FF1493,
+                        stop:0.3 #FFD700,
+                        stop:0.6 #FF69B4,
+                        stop:1 #FFD700
+                    );
+                }
+            """),
+            (0.5, """
+                QProgressBar {
+                    border: none;
+                    background: rgba(255, 255, 255, 0.1);
+                    border-radius: 2px;
+                }
+                QProgressBar::chunk {
+                    border-radius: 2px;
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #FFD700,
+                        stop:0.3 #FF69B4,
+                        stop:0.6 #FFD700,
+                        stop:1 #FF1493
+                    );
+                }
+            """),
+            (1.0, """
+                QProgressBar {
+                    border: none;
+                    background: rgba(255, 255, 255, 0.1);
+                    border-radius: 2px;
+                }
+                QProgressBar::chunk {
+                    border-radius: 2px;
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #FF1493,
+                        stop:0.3 #FFD700,
+                        stop:0.6 #FF69B4,
+                        stop:1 #FFD700
+                    );
+            }
+        """)
+        ]
+        
+        for pos, style in gradient_keyframes:
+            self.gradient_animation.setKeyValueAt(pos, style)
+        
+        self.gradient_animation.start()
+    
+    def setValueSmooth(self, value):
+        """Плавно устанавливает значение с анимацией"""
+        self.value_animation.stop()
+        self.value_animation.setStartValue(self.value())
+        self.value_animation.setEndValue(value)
+        self.value_animation.start()
+        
+        # Усиливаем свечение во время анимации
+        glow = self.graphicsEffect()
+        if glow:
+            glow_anim = QPropertyAnimation(glow, b"color")
+            glow_anim.setDuration(400)
+            glow_anim.setStartValue(QColor(255, 20, 147, 150))
+            glow_anim.setEndValue(QColor(255, 20, 147, 255))
+            glow_anim.setEasingCurve(QEasingCurve.OutQuad)
+            glow_anim.start()
+            
+            # Возвращаем нормальное свечение
+            QTimer.singleShot(400, lambda: self.resetGlow(glow))
+    
+    def resetGlow(self, glow):
+        """Возвращает нормальное свечение"""
+        glow_return = QPropertyAnimation(glow, b"color")
+        glow_return.setDuration(400)
+        glow_return.setStartValue(QColor(255, 20, 147, 255))
+        glow_return.setEndValue(QColor(255, 20, 147, 150))
+        glow_return.setEasingCurve(QEasingCurve.InQuad)
+        glow_return.start()
+
+# В классе MinecraftLauncher заменяем создание прогресс-бара:
+        # Прогресс-бар
+        self.progress_bar = BeautifulProgressBar()
+        self.progress_bar.setVisible(False)
 
 if __name__ == "__main__":
     app = None
